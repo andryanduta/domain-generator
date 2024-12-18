@@ -1,0 +1,160 @@
+package http
+
+import (
+	"errors"
+	"net/http"
+	"time"
+	"log"
+
+	"github.com/yourreponame/yourpath/<%= domainname %>"
+)
+
+var (
+	// DefaultRequestTimeout is used for context cancellation of a request
+	DefaultRequestTimeout = 5000 * time.Millisecond
+
+	// timeFormat denotes the standard time format used in <%= domainname %> HTTP
+	// request and response
+	timeFormat = "02/01/2006 3:04 PM"
+)
+
+//handler implements handlerutil interface
+type handler struct {
+	service      <%= domainname %>.Service
+	httpHandlers     map[string]*httpHandler
+}
+
+type httpHandler struct {
+	handler http.Handler
+	url     string
+}
+
+// Option set options for http handler
+type Option func(*handler)
+
+// HTTPHandlerIdentity denotes the handler identity
+type HTTPHandlerIdentity struct {
+	ConfigName string
+	URL        string
+}
+
+// Scope denotes a shared settings.
+type Scope int
+
+// The following are the known Scopes.
+const (
+	_ Scope = iota
+	ScopeFooHandler
+)
+
+// String returns string representation of Scope.
+func (sc Scope) String() string { return ScopeName[sc] }
+
+// ScopeName defines all known Scopes and their string representation, while ScopeValue
+// is the reverse-mapping of ScopeName. Registering new Scope is done by adding new entry in
+// both variables.
+var (
+	ScopeName = map[Scope]string{
+		ScopeFooHandler: "FooHandler",
+	}
+
+	ScopeValue = map[string]Scope{
+	 	ScopeName[ScopeFooHandler]: ScopeFooHandler,
+	}
+)
+
+// ScopeSettings represents the available configurations of a Scope.
+type ScopeSettings struct {
+	Timeout time.Duration
+}
+
+func getDefaultScopeSettings() map[Scope]ScopeSettings {
+	defaultSettings := make(map[Scope]ScopeSettings)
+	for _, scope := range ScopeValue {
+		defaultSettings[scope] = ScopeSettings{
+			Timeout: DefaultRequestTimeout,
+		}
+	}
+	return defaultSettings
+}
+
+// WithHandler registers a handler to <%= domainname %> service with its identity
+// and the scope settings.
+func WithHandler(httpIdentity HTTPHandlerIdentity, settings map[Scope]ScopeSettings) Option {
+	return Option(func(h *handler) {
+		if h.httpHandlers == nil {
+			h.httpHandlers = make(map[string]*httpHandler, 0)
+		}
+
+		scopes := getDefaultScopeSettings()
+		for key, s := range settings {
+			if s.Timeout <= 0 {
+				s.Timeout = DefaultRequestTimeout
+			}
+			scopes[key] = s
+		}
+
+		newHandler, err := h.createHandler(httpIdentity.ConfigName, scopes)
+		if err != nil {
+			log.Fatalln("[<%= domainname %>] Unable to create handler", err)
+		}
+
+		h.httpHandlers[httpIdentity.ConfigName] = &httpHandler{
+			handler: newHandler,
+			url:     httpIdentity.URL,
+		}
+	})
+}
+
+// New creates new http handler
+func New(svc <%= domainname %>.Service, options ...Option) *handler {
+	handler := &handler{
+		service:   svc,
+	}
+
+	// Apply options
+	for _, opt := range options {
+		opt(handler)
+	}
+
+	return handler
+}
+
+// createHandler create http handler object
+func (h *handler) createHandler(configName string, scopes map[Scope]ScopeSettings) (http.Handler, error) {
+	var newhandler http.Handler
+
+	switch configName {
+	case ExampleHandler.ConfigName:
+	newhandler = &FooHandler{
+		service:   h.service,
+		scopes:    scopes,
+	}
+	default:
+		return newhandler, errInvalidConfig
+	}
+	return newhandler, nil
+}
+
+//GetIdentity returns handler identity
+func (h *handler) GetIdentity() string {
+	return "<%= domainname %>-httphandler"
+}
+
+//Start will start all http handlers
+func (h *handler) Start() error {
+	for _, httpHandler := range h.httpHandlers {
+		http.Handle(httpHandler.url, httpHandler.handler)
+	}
+	return nil
+}
+
+var (
+	errInvalidConfig = errors.New("error invalid config")
+
+	// ExampleHandler denotes <%= domainname %>'s example handler 
+	ExampleHandler = HTTPHandlerIdentity{
+	ConfigName: "example_handler",
+	URL:        "/<%= domainname %>/example",
+	}
+)

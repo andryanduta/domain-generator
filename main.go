@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+
+	"github.com/andryanduta/domain-generator/generator"
 )
 
 func main() {
@@ -26,7 +28,7 @@ func main() {
 
 	fmt.Println("Starting Domain Generator...")
 
-	err := domain_generator.GenerateDomain(*domainName)
+	err := generator.GenerateDomain(*domainName)
 	if err != nil {
 		log.Fatalf("Error: %v\n", err)
 	}

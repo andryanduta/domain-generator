@@ -1,0 +1,29 @@
+package <%= domainname %>
+
+import (
+	"context"
+)
+
+// Data denotes example response data
+type Data struct {
+	ID		int64	 `json:"id"`
+	ShopID 	int64	 `json:"shop_id"`
+}
+
+//go:generate mockgen -destination mockservice/mock_service_test.go -package mockservice github.com/yourreponame/yourpath/<%= domainname %> Service
+type Service interface{
+	// Example service
+	Get(ctx context.Context, id int64) (Data, error)
+}
+
+var defaultService Service
+
+// Init sets the default <%= domainname %> Service.
+func Init(svc Service) {
+	defaultService = svc
+}
+
+// GetService returns the default <%= domainname %> Service.
+func GetService() Service {
+	return defaultService
+}

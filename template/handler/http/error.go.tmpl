@@ -1,0 +1,17 @@
+package http
+
+import (
+	"github.com/pkg/errors"
+)
+
+// The following are the known errors from <%= domainname %> HTTP handlers.
+var (
+	errRequestTimeOut       = errors.New("REQUEST_TIME_OUT")
+	errBadRequest           = errors.New("BAD_REQUEST")
+	errInvalidUser          = errors.New("INVALID_USER")
+	errForbidden            = errors.New("ACCESS_FORBIDDEN")
+	errMethodNotAllowed     = errors.New("METHOD_NOT_ALLOWED")
+	errTooManyRequest       = errors.New("TOO_MANY_REQUEST")
+	errInvalidAction        = errors.New("INVALID_ACTION")
+	errInternalServerError  = errors.New("INTERNAL_SERVER_ERROR")
+)

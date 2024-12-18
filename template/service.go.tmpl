@@ -1,0 +1,25 @@
+package service
+
+import (
+	"context"
+
+	"github.com/yourreponame/yourpath/<%= domainname %>"
+)
+
+//<FOR_STORE_CODE_GENERATION> note: can delete this comment after domain generator runs.
+
+// Service denotes <%= domainname %> service.
+type Service struct {
+}
+
+// New creates new <%= domainname %> service.
+func New( ) *Service {
+	return &Service{
+	}
+}
+
+// Get denotes service implementation of example service Get, it will return example Data response
+func (s *Service) Get(ctx context.Context, id int64) (data <%= domainname %>.Data, err error) {
+	// add your service logic here
+	return
+}

@@ -1,0 +1,91 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/yourreponame/yourpath/<%= domainname %>/service"
+)
+
+// Store denotes <%= domainname %> persistent store.
+type Store struct {
+}
+
+// NewStore creates new <%= domainname %> persistent store.
+func NewStore() *Store {
+	return &Store{
+	}
+}
+
+type storeClient struct {
+	q            Querier
+	isExternalTx bool
+}
+
+//go:generate mockgen -destination ../mockstore/mock_store_test.go -package mockstore github.com/yourreponame/yourpath/<%= domainname %>/store Querier
+
+// Querier provides mechanism to do query
+type Querier interface {
+	Query(query string, args ...interface{}) (*sql.Rows, error)
+	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+}
+
+// NewClient creates a store client with the database connection initialized.
+func (s *Store) NewClient(usingTx bool) (service.StoreClient, error) {
+	var q Querier
+
+	// add your NewClient logic here, for example:
+	// db, err := s.connManager.GetDB()
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// q = db
+
+	// if usingTx {
+	// 	q, err = db.Begin()
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// }
+
+	return &storeClient{
+		q: q,
+	}, nil
+}
+
+// NewClientWithTx creates a store client with the transaction defined outside <%= domainname %>.
+func (s *Store) NewClientWithTx(tx *sqlx.Tx) service.StoreClient {
+	return &storeClient{
+		q:            tx,
+		isExternalTx: true,
+	}
+}
+
+// Commit wraps sqlx's transaction Commit function.
+func (sc *storeClient) Commit() error {
+	if tx, ok := sc.q.(*sqlx.Tx); ok {
+		if sc.isExternalTx {
+			return nil
+		}
+		return tx.Commit()
+	}
+
+	return errors.New("cannot do commit on non-transactional connection")
+}
+
+// Rollback wraps sqlx's transaction Rollback function.
+func (sc *storeClient) Rollback() error {
+	if tx, ok := sc.q.(*sqlx.Tx); ok {
+		if sc.isExternalTx {
+			return nil
+		}
+		return tx.Rollback()
+	}
+
+	return errors.New("cannot do rollback on non-transactional connection")
+}
+
+//TODO: add store function here

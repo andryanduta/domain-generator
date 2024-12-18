@@ -1,7 +1,7 @@
 # Domain generator
 Go packages for generating domain
 
-Previously we were still very repetitive manually creating the domain service, so to minimize the repetition, this tool will automatically generates a new domain service based on your needs. 
+This tool will automatically generates a new domain service based on your needs. Previously we were still very repetitive manually creating the domain service, so to minimize the repetition.
 
 # Architecture
 ```
@@ -14,21 +14,11 @@ domain-name
   ├── store.go 
   ├── store_test.go
   ├── cachestore.go
-  ├── bt_store.go
 ├── handler [optional]
   ├── http [optional]
     ├── http.go
     ├── foo_handler.go
     ├── error.go
-  ├── nsq [optional]
-    ├── nsq.go
-    ├── handler.go
-  ├── grpc [optional]
-    ├── grpc.go
-    ├── handler.go
-    ├── error.go
-  ├── cron [optional]
-    ├── cron.go
 ```
 
 ## Instructions
