@@ -1,5 +1,5 @@
 # Golang Domain Generator
-A Go tool for automatically generating domain services.
+A Go tool for automatically domain-driven design (DDD) based domain services.
 
 The Domain Generator tool helps you quickly create a domain service structure, minimizing the need for repetitive boilerplate code. By using this tool, you can define the domain, service, store, and handler components more efficiently.
 
