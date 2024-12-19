@@ -29,11 +29,11 @@ $ go get github.com/andryanduta/domain-generator
 ```
 Command template
 ```
-$ ./generator.sh [domain_name]
+$ domain-generator -name [domain_name]
 ```
 Complete example
 ```
-$ ./generator.sh adexperiment
+$ domain-generator -name usermanager
 ```
 After the generator runs, you will be asked whether you want install handler, store inside the domain model. Please answer with Y or N (case insensitive).
 # Note: 
