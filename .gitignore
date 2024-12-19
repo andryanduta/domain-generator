@@ -1,2 +1,7 @@
 vendor/
 
+*.exe
+*.out
+*.bin
+
+domain-generator

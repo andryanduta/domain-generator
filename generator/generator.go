@@ -2,11 +2,37 @@ package generator
 
 import (
 	"bufio"
+	_ "embed"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+// Embed the template files
+//go:embed template/domain.go.tmpl
+var domainTemplate string
+
+//go:embed template/service.go.tmpl
+var serviceTemplate string
+
+//go:embed template/store/store.go.tmpl
+var storeTemplate string
+
+//go:embed template/store/cachestore.go.tmpl
+var storeCacheTemplate string
+
+//go:embed template/handler/http/http.go.tmpl
+var httpHandlerTemplate string
+
+//go:embed template/handler/http/error.go.tmpl
+var httpErrorTemplate string
+
+//go:embed template/handler/http/foo_handler.go.tmpl
+var httpFooHandlerTemplate string
+
+//go:embed template/handler/http/util.go.tmpl
+var httpUtilTemplate string
 
 // GenerateDomain creates the domain abstraction, service, store, and handler directories and files in the current working directory.
 func GenerateDomain(domainName string) error {
@@ -28,18 +54,15 @@ func GenerateDomain(domainName string) error {
 
 	// Create domain abstraction
 	createDir(basePath)
-	templatePath := filepath.Join("template", "domain.go.tmpl")
 	outputFile := filepath.Join(basePath, domainName+".go")
-	generateFileFromTemplate(templatePath, outputFile, domainName)
+	generateFileFromTemplate(domainTemplate, outputFile, domainName)
 	fmt.Println("Domain abstraction has been created!")
 
 	// Create service
 	servicePath := filepath.Join(basePath, "service")
-
 	createDir(servicePath)
-	templatePath = filepath.Join("template", "service.go.tmpl")
 	outputFile = filepath.Join(servicePath, "service.go")
-	generateFileFromTemplate(templatePath, outputFile, domainName)
+	generateFileFromTemplate(serviceTemplate, outputFile, domainName)
 
 	fmt.Println("Domain service has been created!")
 
@@ -69,9 +92,8 @@ func StoreInit(basePath, domainName, servicePath string) error {
 			switch storeType {
 			case "database store":
 				// Generate DB store files
-				templatePath := filepath.Join("template", "store", "store.go.tmpl")
 				outputFile := filepath.Join(storePath, "store.go")
-				generateFileFromTemplate(templatePath, outputFile, domainName)
+				generateFileFromTemplate(storeTemplate, outputFile, domainName)
 
 				// Append DB store to service file
 				if err := appendStoreToService("store", servicePath, domainName); err != nil {
@@ -80,9 +102,8 @@ func StoreInit(basePath, domainName, servicePath string) error {
 
 			case "cache store":
 				// Generate Cache store files
-				templatePath := filepath.Join("template", "store", "cachestore.go.tmpl")
 				outputFile := filepath.Join(storePath, "cachestore.go")
-				generateFileFromTemplate(templatePath, outputFile, domainName)
+				generateFileFromTemplate(storeCacheTemplate, outputFile, domainName)
 
 				// Append Cache store to service file
 				if err := appendStoreToService("cacheStore", servicePath, domainName); err != nil {
@@ -112,21 +133,17 @@ func HandlerInit(basePath, domainName string) error {
 				createDir(httpPath)
 
 				// Generate http files
-				templatePath := filepath.Join("template", "handler", "http", "http.go.tmpl")
 				outputFile := filepath.Join(httpPath, "http.go")
-				generateFileFromTemplate(templatePath, outputFile, domainName)
+				generateFileFromTemplate(httpHandlerTemplate, outputFile, domainName)
 
-				templatePath = filepath.Join("template", "handler", "http", "error.go.tmpl")
 				outputFile = filepath.Join(httpPath, "error.go")
-				generateFileFromTemplate(templatePath, outputFile, domainName)
+				generateFileFromTemplate(httpErrorTemplate, outputFile, domainName)
 
-				templatePath = filepath.Join("template", "handler", "http", "foo_handler.go.tmpl")
 				outputFile = filepath.Join(httpPath, "foo_handler.go")
-				generateFileFromTemplate(templatePath, outputFile, domainName)
+				generateFileFromTemplate(httpFooHandlerTemplate, outputFile, domainName)
 
-				templatePath = filepath.Join("template", "handler", "http", "util.go.tmpl")
 				outputFile = filepath.Join(httpPath, "util.go")
-				generateFileFromTemplate(templatePath, outputFile, domainName)
+				generateFileFromTemplate(httpUtilTemplate, outputFile, domainName)
 			}
 
 			fmt.Printf("%s has been created!\n", handlerType)
@@ -156,18 +173,12 @@ func createFile(filePath, content string) {
 	}
 }
 
-func generateFileFromTemplate(templatePath, outputPath, domainName string) {
-	templateContent, err := os.ReadFile(templatePath)
-	if err != nil {
-		fmt.Printf("Error reading template %s: %v\n", templatePath, err)
-		os.Exit(1)
-	}
-
-	content := strings.ReplaceAll(string(templateContent), "<%= domainname %>", domainName)
+func generateFileFromTemplate(templateContent, outputPath, domainName string) error {
+	content := strings.ReplaceAll(templateContent, "<%= domainname %>", domainName)
 	if err := os.WriteFile(outputPath, []byte(content), 0644); err != nil {
-		fmt.Printf("Error creating file %s: %v\n", outputPath, err)
-		os.Exit(1)
+		return fmt.Errorf("failed to write file %s: %w", outputPath, err)
 	}
+	return nil
 }
 
 func appendStoreToService(storeType, servicePath, domainName string) error {
