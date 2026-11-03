@@ -109,7 +109,7 @@ dead-lettered instead of blocking the queue. Everything else is **retryable**.
 | `nsq` | [`nsqio/go-nsq`](https://github.com/nsqio/go-nsq) | finish and log | requeue with backoff, give up after `MaxAttempts` |
 | `kafka` | [`segmentio/kafka-go`](https://github.com/segmentio/kafka-go) | log and commit the offset | retry in place with exponential backoff (keeps partition order); commit only after success |
 | `nats` | [`nats-io/nats.go/jetstream`](https://github.com/nats-io/nats.go) | `TermWithReason` (no redelivery) | `NakWithDelay` |
-| `rabbitmq` | [`rabbitmq/amqp091-go`](https://github.com/rabbitmq/amqp091-go) | `Nack` without requeue (to the dead-letter exchange, if configured) | `Nack` with requeue |
+| `rabbitmq` | [`rabbitmq/amqp091-go`](https://github.com/rabbitmq/amqp091-go) | `Nack` without requeue (to the dead-letter exchange, if configured) | exponential backoff, then `Nack` with requeue; on quorum queues, rejected after `MaxAttempts` (`x-delivery-count`) |
 
 Delivery is at least once for every broker, so keep message handlers idempotent. The latest
 `nats.go` requires Go 1.26; on Go 1.25, `go get github.com/nats-io/nats.go@v1.51.0`.
