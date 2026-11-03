@@ -1,6 +1,7 @@
 // Command domain-generator scaffolds a DDD-style Go domain package.
 //
 //	domain-generator -name order -store -http        # non-interactive
+//	domain-generator -name order -queue kafka -cron  # message consumer and scheduled jobs
 //	domain-generator -name order                     # asks which layers to add
 //	domain-generator -name order -all -dry-run -json # plan only, machine-readable
 //	domain-generator mcp                             # run as an MCP server for AI agents
@@ -53,10 +54,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.StringVar(&opts.Name, "name", "", "domain name: lowercase Go identifier, e.g. order (required)")
 	fs.StringVar(&opts.Dir, "dir", ".", "parent directory to create the domain in")
 	fs.StringVar(&opts.Module, "module", "", "import path of -dir (default: detected from go.mod)")
-	fs.BoolVar(&opts.Store, "store", false, "add a SQL store layer (sqlx)")
-	fs.BoolVar(&opts.Cache, "cache", false, "add a cache store layer")
-	fs.BoolVar(&opts.HTTP, "http", false, "add an HTTP handler layer")
-	fs.BoolVar(&all, "all", false, "add every layer (same as -store -cache -http)")
+	fs.BoolVar(&opts.Store, "store", false, "add a SQL repository (sqlstore, sqlx)")
+	fs.BoolVar(&opts.Cache, "cache", false, "add a cache (cache)")
+	fs.BoolVar(&opts.HTTP, "http", false, "add an HTTP API (handler/httpapi, RFC 9457 errors)")
+	fs.StringVar(&opts.Queue, "queue", "", "add a message consumer under handler/: "+strings.Join(generator.Queues(), ", "))
+	fs.BoolVar(&opts.Cron, "cron", false, "add scheduled jobs (handler/cronjob)")
+	fs.BoolVar(&all, "all", false, "add store, cache, http and cron (combine with -queue for a consumer)")
 	fs.BoolVar(&noPrompt, "no-prompt", false, "never ask; only generate the layers given by flags")
 	fs.BoolVar(&opts.DryRun, "dry-run", false, "show what would be generated without writing files")
 	fs.BoolVar(&asJSON, "json", false, "print the result as JSON (implies -no-prompt)")
@@ -71,13 +74,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if all {
-		opts.Store, opts.Cache, opts.HTTP = true, true, true
+		opts.Store, opts.Cache, opts.HTTP, opts.Cron = true, true, true, true
 	}
 
 	layerFlagSet := false
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
-		case "store", "cache", "http", "all":
+		case "store", "cache", "http", "queue", "cron", "all":
 			layerFlagSet = true
 		}
 	})
@@ -124,14 +127,20 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // askLayers asks which optional layers to add. It reads every answer from one reader, so
 // piped input such as `printf 'y\nn\ny\n' | domain-generator -name x` works.
 func askLayers(opts *generator.Options, in *bufio.Reader, out io.Writer) {
-	opts.Store = ask(in, out, "Add a SQL store layer? (y/N): ")
-	opts.Cache = ask(in, out, "Add a cache store layer? (y/N): ")
-	opts.HTTP = ask(in, out, "Add an HTTP handler layer? (y/N): ")
+	opts.Store = ask(in, out, "Add a SQL repository (sqlstore)? (y/N): ")
+	opts.Cache = ask(in, out, "Add a cache? (y/N): ")
+	opts.HTTP = ask(in, out, "Add an HTTP API (handler/httpapi)? (y/N): ")
+	opts.Queue = askLine(in, out, "Add a message consumer? ("+strings.Join(generator.Queues(), "/")+", empty for none): ")
+	opts.Cron = ask(in, out, "Add scheduled jobs (handler/cronjob)? (y/N): ")
 }
 
 func ask(in *bufio.Reader, out io.Writer, question string) bool {
+	answer := askLine(in, out, question)
+	return answer == "y" || answer == "yes"
+}
+
+func askLine(in *bufio.Reader, out io.Writer, question string) string {
 	fmt.Fprint(out, question)
 	answer, _ := in.ReadString('\n')
-	answer = strings.ToLower(strings.TrimSpace(answer))
-	return answer == "y" || answer == "yes"
+	return strings.ToLower(strings.TrimSpace(answer))
 }

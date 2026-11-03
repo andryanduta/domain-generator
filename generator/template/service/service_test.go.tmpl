@@ -1,0 +1,117 @@
+package service
+
+import (
+	"context"
+	"errors"
+{{- if .Store}}
+	"sync"
+{{- end}}
+	"testing"
+
+	"{{.ImportPath}}"
+)
+{{if .Store}}
+// fakeRepository is an in-memory Repository for tests.
+type fakeRepository struct {
+	mu     sync.Mutex
+	nextID int64
+	rows   map[int64]{{.Name}}.{{.Type}}
+}
+
+func newFakeRepository() *fakeRepository {
+	return &fakeRepository{rows: make(map[int64]{{.Name}}.{{.Type}})}
+}
+
+func (f *fakeRepository) Get(_ context.Context, id int64) ({{.Name}}.{{.Type}}, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.rows[id]
+	if !ok {
+		return {{.Name}}.{{.Type}}{}, {{.Name}}.ErrNotFound
+	}
+	return v, nil
+}
+
+func (f *fakeRepository) Create(_ context.Context, in {{.Name}}.{{.Type}}) ({{.Name}}.{{.Type}}, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextID++
+	in.ID = f.nextID
+	f.rows[in.ID] = in
+	return in, nil
+}
+
+func (f *fakeRepository) WithTx(_ context.Context, fn func(Repository) error) error { return fn(f) }
+{{end}}{{if .Cache}}
+// fakeCache is an in-memory Cache for tests.
+type fakeCache struct{ items map[int64]{{.Name}}.{{.Type}} }
+
+func (c *fakeCache) Get(_ context.Context, id int64) ({{.Name}}.{{.Type}}, bool, error) {
+	v, ok := c.items[id]
+	return v, ok, nil
+}
+
+func (c *fakeCache) Set(_ context.Context, v {{.Name}}.{{.Type}}) error {
+	c.items[v.ID] = v
+	return nil
+}
+{{end}}
+func newTestService() *Service {
+	return New({{if .Store}}newFakeRepository(){{end}}{{if and .Store .Cache}}, {{end}}{{if .Cache}}&fakeCache{items: make(map[int64]{{.Name}}.{{.Type}})}{{end}})
+}
+
+func TestGet(t *testing.T) {
+	ctx := context.Background()
+	svc := newTestService()
+{{- if .Store}}
+	created, err := svc.Create(ctx, {{.Name}}.{{.Type}}{Name: "example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+{{- end}}
+
+	tests := []struct {
+		name    string
+		id      int64
+		wantErr error
+	}{
+		{"zero id is invalid", 0, {{.Name}}.ErrInvalid},
+		{"negative id is invalid", -1, {{.Name}}.ErrInvalid},
+		{"unknown id is not found", 999, {{.Name}}.ErrNotFound},
+{{- if .Store}}
+		{"existing id", created.ID, nil},
+{{- end}}
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := svc.Get(ctx, tt.id)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Get(%d) error = %v, want %v", tt.id, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestCreate(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name    string
+		in      {{.Name}}.{{.Type}}
+		wantErr error
+	}{
+		{"valid", {{.Name}}.{{.Type}}{Name: "example"}, nil},
+		{"name is trimmed", {{.Name}}.{{.Type}}{Name: "  example  "}, nil},
+		{"empty name is invalid", {{.Name}}.{{.Type}}{Name: "   "}, {{.Name}}.ErrInvalid},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := newTestService().Create(ctx, tt.in)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Create error = %v, want %v", err, tt.wantErr)
+			}
+			if err == nil && got.Name != "example" {
+				t.Fatalf("Create name = %q, want %q", got.Name, "example")
+			}
+		})
+	}
+}

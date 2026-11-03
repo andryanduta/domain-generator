@@ -1,6 +1,6 @@
 ---
 name: domain-generator
-description: Use when adding a new domain, bounded context or feature package to a Go service. Scaffolds the domain contract, service and optional SQL store, cache store and HTTP handler in one deterministic step instead of hand-writing boilerplate.
+description: Use when adding a new domain, bounded context or feature package to a Go service. Scaffolds the domain, service, tests and optional SQL repository, cache and HTTP API in one deterministic step instead of hand-writing boilerplate.
 ---
 
 # domain-generator
@@ -19,24 +19,34 @@ their `AGENTS.md`.
 
 ## Steps
 
-1. Pick a name: a lowercase Go identifier (`order`, `user_profile`). No hyphens, no capitals.
-2. Choose layers: `store` for SQL persistence (sqlx), `cache` for a cache store, `http` for an HTTP
-   handler. Ask the user if it's unclear.
+1. Pick a name: a lowercase Go identifier (`order`, `user_profile`). No hyphens, no capitals, and
+   not a package name the code imports (`service`, `cache`, `http`, ...).
+2. Choose layers: `store` for a SQL repository (sqlx), `cache` for a cache, `http` for an HTTP API,
+   `queue` (`nsq`, `kafka`, `nats` or `rabbitmq`) for a message consumer, `cron` for scheduled jobs.
+   Match the broker the project already uses; ask the user if it's unclear. In applications, generate under `internal/`.
 3. Generate. Prefer the MCP tool if it's available:
    - MCP: call `generate_domain` with `name`, an **absolute** `dir` (the parent directory, usually
      where sibling domains live) and the layer flags. Use `dry_run: true` first if unsure.
    - CLI: `domain-generator -name <name> -dir <parent> -store -http -json`
      (install with `go install github.com/andryanduta/domain-generator@latest`).
-4. Run `go get` for every entry in `needs_deps` from the result.
-5. Read the generated `<name>/AGENTS.md`, then implement the TODOs:
-   - add use cases to the `Service` interface in `<name>.go` first, then implement them in `service/`;
-   - add data access to the interfaces in `service/service.go`, then implement it in `store/`;
-   - keep the handler thin: decode, call the service, encode.
-6. Verify: `gofmt -l .`, `go vet ./...`, `go test ./...`.
+4. Run `go get` for every entry in `needs_deps` from the result, and confirm `go test ./...` passes
+   before changing anything.
+5. Read the generated `<name>/AGENTS.md`, then build the feature:
+   - replace the example fields on the entity in `<name>.go`;
+   - add use cases to the `Service` interface first, then implement them in `service/` with a test case each;
+   - add data access to the interfaces in `service/service.go`, then implement it in `sqlstore/` or `cache/`;
+   - keep everything under `handler/` thin: decode, call the service, encode or acknowledge. Return
+     domain errors so HTTP maps them to the right RFC 9457 status and consumers don't retry `ErrInvalid`;
+   - change the message payload in `handler/<queue>consumer/message.go`, and keep consumers idempotent.
+6. Wire it in `main`: `service.New(sqlstore.New(db), ...)`, then `httpapi.RegisterRoutes(mux, logger, svc)`,
+   the consumer's `New(...)`, and `go cronjob.Run(ctx, logger, cronjob.Jobs(svc)...)`.
+7. Verify: `gofmt -l .`, `go vet ./...`, `go test ./...`.
 
 ## Rules
 
 - Never overwrite or hand-recreate a generated domain. If the directory exists, the tool refuses;
   pick another name or edit the existing domain.
 - Keep the compile-time interface checks (`var _ order.Service = (*Service)(nil)`).
-- Rename the example `FooHandler` and `Data` types to real names before finishing.
+- Don't add package-level state or register routes on `http.DefaultServeMux`; pass dependencies in.
+- If the project uses a JSON response envelope instead of RFC 9457, change only `handler/httpapi/respond.go`
+  (see the project's docs/response-formats.md).

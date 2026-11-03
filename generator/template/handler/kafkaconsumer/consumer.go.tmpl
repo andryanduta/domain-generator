@@ -1,0 +1,94 @@
+// Package kafkaconsumer consumes {{.Name}} messages from Kafka (github.com/segmentio/kafka-go).
+//
+// Wire it in main:
+//
+//	r := kafka.NewReader(kafka.ReaderConfig{Brokers: brokers, GroupID: "{{.Name}}-service", Topic: "{{.Route}}.create"})
+//	defer r.Close()
+//	err := kafkaconsumer.New(logger, svc, r).Run(ctx)
+package kafkaconsumer
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"time"
+
+	"github.com/segmentio/kafka-go"
+
+	"{{.ImportPath}}"
+)
+
+// Reader is the part of *kafka.Reader the consumer uses.
+type Reader interface {
+	FetchMessage(ctx context.Context) (kafka.Message, error)
+	CommitMessages(ctx context.Context, msgs ...kafka.Message) error
+}
+
+var _ Reader = (*kafka.Reader)(nil)
+
+// Consumer processes messages in order and commits offsets only after a message is handled.
+// Retryable errors are retried with exponential backoff (blocking the partition, which keeps
+// ordering); permanent errors are logged and committed so one bad message can't stall it.
+type Consumer struct {
+	logger     *slog.Logger
+	svc        {{.Name}}.Service
+	reader     Reader
+	timeout    time.Duration
+	minBackoff time.Duration
+	maxBackoff time.Duration
+}
+
+// New returns a Consumer reading from r.
+func New(logger *slog.Logger, svc {{.Name}}.Service, r Reader) *Consumer {
+	return &Consumer{logger: logger, svc: svc, reader: r, timeout: 30 * time.Second,
+		minBackoff: 100 * time.Millisecond, maxBackoff: 30 * time.Second}
+}
+
+// Run consumes until ctx is cancelled, then returns nil.
+func (c *Consumer) Run(ctx context.Context) error {
+	for {
+		m, err := c.reader.FetchMessage(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		if err := c.process(ctx, m); err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		if err := c.reader.CommitMessages(ctx, m); err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+	}
+}
+
+// process handles m, retrying retryable errors until success, a permanent error, or ctx ends.
+func (c *Consumer) process(ctx context.Context, m kafka.Message) error {
+	backoff := c.minBackoff
+	for {
+		hctx, cancel := context.WithTimeout(ctx, c.timeout)
+		err := handle(hctx, c.svc, m.Value)
+		cancel()
+		switch {
+		case err == nil:
+			return nil
+		case errors.Is(err, errPermanent):
+			c.logger.WarnContext(ctx, "skipping {{.Name}} message", "partition", m.Partition, "offset", m.Offset, "error", err)
+			return nil
+		}
+		c.logger.ErrorContext(ctx, "retrying {{.Name}} message", "partition", m.Partition, "offset", m.Offset, "backoff", backoff, "error", err)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, c.maxBackoff)
+	}
+}

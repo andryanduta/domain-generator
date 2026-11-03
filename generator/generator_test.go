@@ -16,9 +16,32 @@ func TestValidateName(t *testing.T) {
 			t.Errorf("ValidateName(%q) = %v, want nil", name, err)
 		}
 	}
-	for _, name := range []string{"", "Order", "my-domain", "../escaped", "a/b", "1order", "_x", "func", "type", "main", "internal", "with space"} {
+	for _, name := range []string{"", "Order", "my-domain", "../escaped", "a/b", "1order", "_x", "func", "type", "main", "internal", "with space", "service", "cache", "http", "errors"} {
 		if err := ValidateName(name); err == nil {
 			t.Errorf("ValidateName(%q) = nil, want error", name)
+		}
+	}
+}
+
+// Names that clash with identifiers in the generated code must fail validation instead of
+// producing a package that doesn't build (PR #2 review).
+func TestValidateNameRejectsTemplateIdentifiers(t *testing.T) {
+	for _, name := range []string{"logger", "row", "handle", "decode", "svc", "ctx", "msg", "got", "len", "string", "any"} {
+		if err := ValidateName(name); err == nil {
+			t.Errorf("ValidateName(%q) = nil, want an error", name)
+		}
+	}
+}
+
+// realisticNames are common domain names that must stay valid. TestRealisticNamesCompile
+// proves they build.
+var realisticNames = []string{"order", "event", "message", "item", "record", "data", "job",
+	"status", "method", "ticker", "payment", "product", "user", "invoice"}
+
+func TestValidateNameAcceptsRealisticNames(t *testing.T) {
+	for _, name := range realisticNames {
+		if err := ValidateName(name); err != nil {
+			t.Errorf("ValidateName(%q) = %v", name, err)
 		}
 	}
 }
@@ -58,16 +81,36 @@ func TestDetectModule(t *testing.T) {
 	}
 }
 
+func TestTemplateDataNames(t *testing.T) {
+	cases := []struct{ name, typ, v, route, table string }{
+		{"order", "Order", "order", "orders", "orders"},
+		{"user_profile", "UserProfile", "userProfile", "user-profiles", "user_profiles"},
+		{"address", "Address", "address", "addresses", "addresses"},
+		{"category", "Category", "category", "categories", "categories"},
+		{"day", "Day", "day", "days", "days"},
+	}
+	for _, c := range cases {
+		d := newTemplateData(Options{Name: c.name}, "x")
+		if d.Type != c.typ || d.Var != c.v || d.Route != c.route || d.Table != c.table {
+			t.Errorf("%s: got %+v", c.name, d)
+		}
+	}
+}
+
 func TestGenerateFiles(t *testing.T) {
 	cases := []struct {
 		name string
 		opts Options
 		want []string
 	}{
-		{"core only", Options{}, []string{"AGENTS.md", "order.go", "service/service.go"}},
-		{"all layers", Options{Store: true, Cache: true, HTTP: true}, []string{
-			"AGENTS.md", "handler/http/error.go", "handler/http/foo_handler.go", "handler/http/http.go",
-			"handler/http/util.go", "order.go", "service/service.go", "store/cachestore.go", "store/store.go",
+		{"core only", Options{}, []string{"AGENTS.md", "order.go", "service/service.go", "service/service_test.go"}},
+		{"all layers", Options{Store: true, Cache: true, HTTP: true, Queue: "kafka", Cron: true}, []string{
+			"AGENTS.md", "cache/cache.go",
+			"handler/cronjob/cronjob.go", "handler/cronjob/cronjob_test.go",
+			"handler/httpapi/handlers.go", "handler/httpapi/handlers_test.go", "handler/httpapi/respond.go", "handler/httpapi/routes.go",
+			"handler/kafkaconsumer/consumer.go", "handler/kafkaconsumer/consumer_test.go",
+			"handler/kafkaconsumer/message.go", "handler/kafkaconsumer/message_test.go",
+			"order.go", "service/service.go", "service/service_test.go", "sqlstore/sqlstore.go",
 		}},
 	}
 	for _, tc := range cases {
@@ -92,6 +135,13 @@ func TestGenerateFiles(t *testing.T) {
 			}
 			assertNoLeftovers(t, dir)
 		})
+	}
+}
+
+func TestGenerateRejectsUnknownQueue(t *testing.T) {
+	_, err := Generate(Options{Name: "order", Dir: t.TempDir(), Module: "example.com/app", Queue: "sqs"})
+	if err == nil || !strings.Contains(err.Error(), "unknown queue") {
+		t.Fatalf("err = %v, want unknown queue", err)
 	}
 }
 
@@ -135,7 +185,7 @@ func TestGenerateRejectsTraversal(t *testing.T) {
 }
 
 func TestRenderedGoIsFormattedAndHasNoPlaceholders(t *testing.T) {
-	out, err := Render(Options{Name: "order", Store: true, Cache: true, HTTP: true}, "example.com/app/order")
+	out, err := Render(Options{Name: "order", Store: true, Cache: true, HTTP: true, Queue: "nsq", Cron: true}, "example.com/app/order")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,8 +199,9 @@ func TestRenderedGoIsFormattedAndHasNoPlaceholders(t *testing.T) {
 	}
 }
 
-// TestGeneratedCodeCompiles generates every layer combination into a throwaway module and
-// runs `go vet` on it. sqlx is replaced by a local stub so the test works offline.
+// TestGeneratedCodeCompiles generates every layer combination (for a simple and a
+// multi-word domain name) into a throwaway module, then runs `go vet` and the generated
+// tests against the real sqlx module.
 func TestGeneratedCodeCompiles(t *testing.T) {
 	if testing.Short() {
 		t.Skip("compiles generated code with the go tool")
@@ -160,32 +211,29 @@ func TestGeneratedCodeCompiles(t *testing.T) {
 		t.Skip("go tool not found")
 	}
 
-	for _, combo := range layerCombos() {
-		t.Run(combo.label(), func(t *testing.T) {
-			t.Parallel()
-			root := t.TempDir()
-			writeFile(t, filepath.Join(root, "go.mod"), strings.Join([]string{
-				"module example.com/app", "", "go 1.22", "",
-				"require github.com/jmoiron/sqlx v1.4.0", "",
-				"replace github.com/jmoiron/sqlx => ./_stub/sqlx", "",
-			}, "\n"))
-			writeFile(t, filepath.Join(root, "_stub", "sqlx", "go.mod"), "module github.com/jmoiron/sqlx\n\ngo 1.22\n")
-			writeFile(t, filepath.Join(root, "_stub", "sqlx", "sqlx.go"),
-				"package sqlx\n\nimport \"database/sql\"\n\n// Tx stubs sqlx.Tx.\ntype Tx struct{ *sql.Tx }\n")
+	for _, name := range []string{"order", "user_profile"} {
+		for _, combo := range layerCombos() {
+			t.Run(name+"/"+combo.label(), func(t *testing.T) {
+				t.Parallel()
+				root := t.TempDir()
+				writeFile(t, filepath.Join(root, "go.mod"), "module example.com/app\n\ngo 1.25\n\n"+pinnedDeps)
 
-			opts := combo.opts
-			opts.Name, opts.Dir = "order", root
-			if _, err := Generate(opts); err != nil {
-				t.Fatal(err)
-			}
+				opts := combo.opts
+				opts.Name, opts.Dir = name, root
+				if _, err := Generate(opts); err != nil {
+					t.Fatal(err)
+				}
 
-			cmd := exec.Command(goBin, "vet", "./order/...")
-			cmd.Dir = root
-			cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off", "GOTOOLCHAIN=local", "GOPROXY=off")
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("generated code does not compile:\n%s", out)
-			}
-		})
+				for _, args := range [][]string{{"vet", "./..."}, {"test", "-count=1", "./..."}} {
+					cmd := exec.Command(goBin, args...)
+					cmd.Dir = root
+					cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off", "GOTOOLCHAIN=local")
+					if out, err := cmd.CombinedOutput(); err != nil {
+						t.Fatalf("go %s on generated code failed:\n%s", strings.Join(args, " "), out)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -202,17 +250,73 @@ func (c combo) label() string {
 	if c.opts.HTTP {
 		parts = append(parts, "http")
 	}
+	if c.opts.Queue != "" {
+		parts = append(parts, c.opts.Queue)
+	}
+	if c.opts.Cron {
+		parts = append(parts, "cron")
+	}
 	if len(parts) == 0 {
 		return "core"
 	}
 	return strings.Join(parts, "+")
 }
 
+// TestRealisticNamesCompile builds every realistic name with all layers, rotating through the
+// queues, so template identifiers that would shadow a valid domain name are caught.
+func TestRealisticNamesCompile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("compiles generated code with the go tool")
+	}
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("go tool not found")
+	}
+	queues := Queues()
+	for i, name := range realisticNames {
+		opts := Options{Store: true, Cache: true, HTTP: true, Cron: true, Queue: queues[i%len(queues)]}
+		t.Run(name+"/"+opts.Queue, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			writeFile(t, filepath.Join(root, "go.mod"), "module example.com/app\n\ngo 1.25\n\n"+pinnedDeps)
+			opts.Name, opts.Dir = name, root
+			if _, err := Generate(opts); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(goBin, "vet", "./...")
+			cmd.Dir = root
+			cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off", "GOTOOLCHAIN=local")
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("go vet on generated code failed:\n%s", out)
+			}
+		})
+	}
+}
+
+// pinnedDeps pins the client libraries generated code may import, so the compile test is
+// reproducible. Bump them deliberately.
+const pinnedDeps = `require (
+	github.com/jmoiron/sqlx v1.4.0
+	github.com/nats-io/nats.go v1.51.0 // newest release supporting Go 1.25
+	github.com/nsqio/go-nsq v1.1.0
+	github.com/rabbitmq/amqp091-go v1.16.0
+	github.com/segmentio/kafka-go v0.4.51
+)
+`
+
+// layerCombos covers every store/cache/http combination, every queue alone with cron, and
+// every queue with all other layers.
 func layerCombos() []combo {
 	var out []combo
 	for i := 0; i < 8; i++ {
 		out = append(out, combo{Options{Store: i&1 != 0, Cache: i&2 != 0, HTTP: i&4 != 0}})
 	}
+	for _, q := range Queues() {
+		out = append(out,
+			combo{Options{Queue: q, Cron: true}},
+			combo{Options{Store: true, Cache: true, HTTP: true, Queue: q}})
+	}
+	out = append(out, combo{Options{Cron: true}})
 	return out
 }
 

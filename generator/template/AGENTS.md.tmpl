@@ -7,21 +7,43 @@ people and coding agents working in this package.
 
 | Path | Layer | Rule |
 |---|---|---|
-| `{{.Name}}.go` | Domain contract | Entities and the `Service` interface. No I/O, no imports from other layers. |
-| `service/` | Business logic | Implements `{{.Name}}.Service`. Talks to storage only through the interfaces it declares (`Store`, `CacheStore`). |
-{{- if or .Store .Cache}}
-| `store/` | Persistence | Implements the interfaces declared in `service/`. No business rules here. |
+| `{{.Name}}.go` | Domain | Entities, domain errors (`ErrNotFound`, `ErrInvalid`) and the `Service` interface. No I/O, no imports from other layers. |
+| `service/` | Use cases | Implements `{{.Name}}.Service`. Declares the interfaces it needs{{if .Store}} (`Repository`{{if .Cache}}, `Cache`{{end}}){{else if .Cache}} (`Cache`){{end}} and never imports adapters. |
+{{- if .Store}}
+| `sqlstore/` | Adapter | Implements `service.Repository` with sqlx. Maps rows to domain types; no business rules. |
+{{- end}}
+{{- if .Cache}}
+| `cache/` | Adapter | Implements `service.Cache` (`Memory` for now). |
 {{- end}}
 {{- if .HTTP}}
-| `handler/http/` | Transport | Decodes requests, calls `{{.Name}}.Service`, encodes responses. No business rules here. |
+| `handler/httpapi/` | Inbound: HTTP | Decodes requests, calls `{{.Name}}.Service`, encodes responses. Errors are RFC 9457 `application/problem+json`. |
+{{- end}}
+{{- if .Queue}}
+| `handler/{{.QueuePkg}}/` | Inbound: {{.Queue}} | Decodes messages (`message.go`), calls `{{.Name}}.Service`. Permanent failures (bad payload, `ErrInvalid`) are dropped or dead-lettered; other errors are retried. |
+{{- end}}
+{{- if .Cron}}
+| `handler/cronjob/` | Inbound: schedule | `Jobs(svc)` lists scheduled jobs; `Run` executes them without overlap until the context ends. |
 {{- end}}
 
-Dependencies point inward: handler → domain ← service → (interfaces) ← store.
+Dependencies point inward: adapters (`sqlstore`, `cache`) and inbound handlers (`handler/...`)
+depend on `service` and the domain, never the reverse. Each `handler/` subpackage depends only on
+`{{.Name}}.Service`, never on another handler. Wire everything in `main` with constructors; there
+is no global state.
 
 ## When you change this package
 
-- Add a use case: add the method to `Service` in `{{.Name}}.go` first, then implement it in `service/`.
-- Need new data access: declare it on the interface in `service/service.go`, then implement it in `store/`.
+- New use case: add it to `Service` in `{{.Name}}.go`, implement it in `service/`, and add a case to `service/service_test.go`.
+- New data access: add the method to the interface in `service/service.go`, then implement it in the adapter.
+- Business rule violations: return (or wrap with `%w`) a domain error so the transport maps it to the right status.
 - Keep the compile-time checks (`var _ {{.Name}}.Service = (*Service)(nil)`) so drift fails the build.
-- Regenerate mocks with `go generate ./...` (uses [mockgen](https://github.com/uber-go/mock)).
+- Keep every handler thin: decode, call the service, encode or acknowledge. Business rules live in `service/`.
+{{- if .HTTP}}
+- HTTP timeouts belong on the `http.Server` or `http.TimeoutHandler`; always pass `r.Context()` down.
+{{- end}}
+{{- if .Queue}}
+- Message handlers must be idempotent: brokers deliver at least once, so the same message can arrive twice.
+{{- end}}
+{{- if .Cron}}
+- With several replicas, guard jobs with a distributed lock so each runs once per interval.
+{{- end}}
 - Before finishing: `gofmt -l .`, `go vet ./...`, `go test ./...`.

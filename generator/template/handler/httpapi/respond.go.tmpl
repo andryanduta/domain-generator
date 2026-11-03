@@ -1,0 +1,64 @@
+package httpapi
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+
+	"{{.ImportPath}}"
+)
+
+const maxBodyBytes = 1 << 20 // 1 MiB
+
+// decode reads a JSON request body into T, rejecting unknown fields, trailing data and
+// bodies larger than maxBodyBytes.
+func decode[T any](w http.ResponseWriter, r *http.Request) (T, error) {
+	var v T
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&v); err != nil {
+		return v, fmt.Errorf("decode request body: %w", err)
+	}
+	if dec.More() {
+		return v, errors.New("decode request body: unexpected data after JSON object")
+	}
+	return v, nil
+}
+
+// writeJSON writes v as a plain JSON response body.
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// Problem is an RFC 9457 problem details object (https://www.rfc-editor.org/rfc/rfc9457).
+type Problem struct {
+	Type     string `json:"type"`
+	Title    string `json:"title"`
+	Status   int    `json:"status"`
+	Detail   string `json:"detail,omitempty"`
+	Instance string `json:"instance,omitempty"`
+}
+
+// writeProblem maps err to a status code and writes it as application/problem+json.
+// Domain errors are shown to the client; anything else is logged and hidden.
+func writeProblem(w http.ResponseWriter, r *http.Request, logger *slog.Logger, err error) {
+	p := Problem{Type: "about:blank", Instance: r.URL.Path}
+	switch {
+	case errors.Is(err, {{.Name}}.ErrNotFound):
+		p.Status, p.Detail = http.StatusNotFound, err.Error()
+	case errors.Is(err, {{.Name}}.ErrInvalid):
+		p.Status, p.Detail = http.StatusBadRequest, err.Error()
+	default:
+		p.Status = http.StatusInternalServerError
+		logger.ErrorContext(r.Context(), "request failed", "method", r.Method, "path", r.URL.Path, "error", err)
+	}
+	p.Title = http.StatusText(p.Status)
+
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(p.Status)
+	_ = json.NewEncoder(w).Encode(p)
+}

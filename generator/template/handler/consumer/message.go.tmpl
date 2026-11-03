@@ -1,0 +1,36 @@
+package {{.QueuePkg}}
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+
+	"{{.ImportPath}}"
+)
+
+// create{{.Type}}Message is the JSON payload of a "create {{.Name}}" message. Unknown fields
+// are ignored so producers can add fields without breaking this consumer.
+type create{{.Type}}Message struct {
+	Name string `json:"name"`
+}
+
+// errPermanent marks failures that will never succeed on retry (bad payloads, invalid input).
+// They are dropped or dead-lettered instead of retried.
+var errPermanent = errors.New("permanent failure")
+
+// handle decodes body and runs the matching {{.Name}} use case. It returns an error wrapping
+// errPermanent when retrying cannot help.
+func handle(ctx context.Context, svc {{.Name}}.Service, body []byte) error {
+	var msg create{{.Type}}Message
+	if err := json.Unmarshal(body, &msg); err != nil {
+		return fmt.Errorf("%w: decode message: %v", errPermanent, err)
+	}
+	if _, err := svc.Create(ctx, {{.Name}}.{{.Type}}{Name: msg.Name}); err != nil {
+		if errors.Is(err, {{.Name}}.ErrInvalid) {
+			return fmt.Errorf("%w: %v", errPermanent, err)
+		}
+		return err
+	}
+	return nil
+}

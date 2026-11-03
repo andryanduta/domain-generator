@@ -1,0 +1,83 @@
+// Package cronjob runs scheduled {{.Name}} jobs.
+//
+// It uses only the standard library: each Job runs on a fixed interval, never overlaps
+// with itself, and stops when the context is cancelled. Wire it in main:
+//
+//	go cronjob.Run(ctx, logger, cronjob.Jobs(svc)...)
+//
+// Need cron expressions instead? Keep Jobs and schedule each Job.Run with a library such as
+// github.com/robfig/cron/v3: c.AddFunc("0 * * * *", func() { _ = job.Run(ctx) }).
+// When several replicas run, guard jobs with a distributed lock (e.g. a database advisory lock).
+package cronjob
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"sync"
+	"time"
+
+	"{{.ImportPath}}"
+)
+
+// Job is a named task that runs every Every.
+type Job struct {
+	Name  string
+	Every time.Duration
+	Run   func(ctx context.Context) error
+}
+
+// Jobs returns the {{.Name}} scheduled jobs.
+func Jobs(svc {{.Name}}.Service) []Job {
+	return []Job{
+		{
+			Name:  "{{.Route}}-example",
+			Every: time.Hour,
+			Run: func(ctx context.Context) error {
+				// TODO: call a {{.Name}} use case, e.g. expiring stale records via svc.
+				_ = svc
+				return nil
+			},
+		},
+	}
+}
+
+// Run starts every job and blocks until ctx is cancelled and all jobs have stopped.
+func Run(ctx context.Context, logger *slog.Logger, jobs ...Job) {
+	var wg sync.WaitGroup
+	for _, job := range jobs {
+		wg.Add(1)
+		go func(job Job) {
+			defer wg.Done()
+			ticker := time.NewTicker(job.Every)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					runOnce(ctx, logger, job)
+				}
+			}
+		}(job)
+	}
+	wg.Wait()
+}
+
+// runOnce runs job once, logging its outcome and recovering from panics.
+func runOnce(ctx context.Context, logger *slog.Logger, job Job) {
+	start := time.Now()
+	err := func() (err error) {
+		defer func() {
+			if p := recover(); p != nil {
+				err = fmt.Errorf("panic: %v", p)
+			}
+		}()
+		return job.Run(ctx)
+	}()
+	if err != nil {
+		logger.ErrorContext(ctx, "job failed", "job", job.Name, "duration", time.Since(start), "error", err)
+		return
+	}
+	logger.InfoContext(ctx, "job finished", "job", job.Name, "duration", time.Since(start))
+}

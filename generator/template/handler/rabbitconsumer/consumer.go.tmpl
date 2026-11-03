@@ -1,0 +1,109 @@
+// Package rabbitconsumer consumes {{.Name}} messages from RabbitMQ
+// (github.com/rabbitmq/amqp091-go).
+//
+// Wire it in main (manual acks, small prefetch so backoff pauses delivery):
+//
+//	_ = ch.Qos(1, 0, false)
+//	deliveries, _ := ch.ConsumeWithContext(ctx, "{{.Route}}.create", "{{.Name}}-service", false, false, false, false, nil)
+//	err := rabbitconsumer.New(logger, svc).Run(ctx, deliveries)
+//
+// Permanent failures are rejected without requeue; configure a dead-letter exchange on the queue
+// to keep them. Retryable failures are requeued after an exponential backoff, so an outage does
+// not turn into a redelivery storm. On quorum queues the x-delivery-count header caps attempts at
+// MaxAttempts; also set the queue's delivery-limit as a broker-side safety net.
+package rabbitconsumer
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"time"
+
+	amqp "github.com/rabbitmq/amqp091-go"
+
+	"{{.ImportPath}}"
+)
+
+// MaxAttempts is how many deliveries a message gets (when the broker reports x-delivery-count,
+// as quorum queues do) before it is rejected to the dead-letter exchange.
+const MaxAttempts = 5
+
+// Consumer processes RabbitMQ deliveries one at a time.
+type Consumer struct {
+	logger     *slog.Logger
+	svc        {{.Name}}.Service
+	timeout    time.Duration
+	minBackoff time.Duration
+	maxBackoff time.Duration
+	backoff    time.Duration                         // current delay before requeue; 0 after a success
+	sleep      func(context.Context, time.Duration) // replaced in tests
+}
+
+// New returns a Consumer with a 30 s per-message timeout and a 100 ms to 30 s retry backoff.
+func New(logger *slog.Logger, svc {{.Name}}.Service) *Consumer {
+	return &Consumer{logger: logger, svc: svc, timeout: 30 * time.Second,
+		minBackoff: 100 * time.Millisecond, maxBackoff: 30 * time.Second, sleep: sleepContext}
+}
+
+// Run handles deliveries until ctx is cancelled or the channel closes.
+func (c *Consumer) Run(ctx context.Context, deliveries <-chan amqp.Delivery) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case d, ok := <-deliveries:
+			if !ok {
+				return errors.New("delivery channel closed")
+			}
+			c.process(ctx, d)
+		}
+	}
+}
+
+func (c *Consumer) process(ctx context.Context, d amqp.Delivery) {
+	hctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+
+	err := handle(hctx, c.svc, d.Body)
+	switch {
+	case err == nil:
+		c.backoff = 0
+		if err := d.Ack(false); err != nil {
+			c.logger.ErrorContext(ctx, "ack failed", "delivery_tag", d.DeliveryTag, "error", err)
+		}
+	case errors.Is(err, errPermanent):
+		c.logger.WarnContext(ctx, "rejecting {{.Name}} message", "delivery_tag", d.DeliveryTag, "error", err)
+		_ = d.Nack(false, false) // to the dead-letter exchange, if configured
+	case deliveryCount(d) >= MaxAttempts:
+		c.logger.ErrorContext(ctx, "giving up on {{.Name}} message", "delivery_tag", d.DeliveryTag, "attempts", deliveryCount(d), "error", err)
+		_ = d.Nack(false, false)
+	default:
+		c.backoff = min(max(c.backoff*2, c.minBackoff), c.maxBackoff)
+		c.logger.ErrorContext(ctx, "requeueing {{.Name}} message", "delivery_tag", d.DeliveryTag, "backoff", c.backoff, "error", err)
+		c.sleep(ctx, c.backoff)
+		_ = d.Nack(false, true)
+	}
+}
+
+// deliveryCount returns the x-delivery-count header set by quorum queues (0 when absent).
+func deliveryCount(d amqp.Delivery) int64 {
+	switch n := d.Headers["x-delivery-count"].(type) {
+	case int64:
+		return n
+	case int32:
+		return int64(n)
+	case int:
+		return int64(n)
+	}
+	return 0
+}
+
+// sleepContext waits for wait or until ctx is cancelled.
+func sleepContext(ctx context.Context, wait time.Duration) {
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
+	}
+}
