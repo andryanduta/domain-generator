@@ -4,4 +4,5 @@ vendor/
 *.out
 *.bin
 
-domain-generator
+# the built binary at the repo root (not skills/domain-generator/)
+/domain-generator

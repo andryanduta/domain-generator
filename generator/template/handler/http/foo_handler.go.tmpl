@@ -3,139 +3,96 @@ package http
 import (
 	"context"
 	"encoding/json"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
 
-	"github.com/yourreponame/yourpath/<%= domainname %>"
+	"{{.ImportPath}}"
 )
 
-// FooHandler denotes <%= domainname %>'s example handler for HTTP API
+// FooHandler is an example {{.Name}} HTTP handler.
 type FooHandler struct {
-	service   <%= domainname %>.Service
-	scopes    map[Scope]ScopeSettings
+	service {{.Name}}.Service
+	scopes  map[Scope]ScopeSettings
 }
 
-// FooHandlerRequest represent request for FooHandler
+// FooHandlerRequest is the FooHandler request body.
 type FooHandlerRequest struct {
 	Arg []Bar `json:"arg"`
 }
 
-// Data denotes example response data
+// Bar is an example request item.
 type Bar struct {
-	Arg1	int64	`json:"arg1"`
-	Arg2 	int64	`json:"arg2"`
+	Arg1 int64 `json:"arg1"`
+	Arg2 int64 `json:"arg2"`
 }
 
-// FooHandlerResponse represent request for FooHandler
+// FooHandlerResponse is the FooHandler response body.
 type FooHandlerResponse struct {
 	StandardEnvelope
 	Data responseData `json:"data,omitempty"`
 }
 
 type responseData struct {
-	Arg []<%= domainname %>.Data `json:"arg,omitempty"`
+	Arg []{{.Name}}.Data `json:"arg,omitempty"`
 }
 
 func (h *FooHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	timeout := h.scopes[ScopeFooHandler].Timeout
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
-	defer cancel()
-	
-	var httpError *StandardError
-	var err error
-	var postData FooHandlerRequest
+	if r.Method != http.MethodPost {
+		writeStandardError(w, http.StatusMethodNotAllowed, errMethodNotAllowed)
+		return
+	}
 
-	defer func() {
-	if httpError != nil {
-			errCode, _ := strconv.Atoi(httpError.Code)
-			WriteErrorResponse(w, errCode, []StandardError{*httpError})
+	ctx, cancel := context.WithTimeout(r.Context(), h.scopes[ScopeFooHandler].Timeout)
+	defer cancel()
+
+	// Buffered so the worker never blocks (and leaks) if the request times out first.
+	resultCh := make(chan []{{.Name}}.Data, 1)
+	errCh := make(chan *StandardError, 1)
+
+	go func() {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			log.Printf("[{{.Name}}] failed to read body: %+v", err)
+			errCh <- newStandardError(http.StatusBadRequest, err)
+			return
 		}
+
+		var req FooHandlerRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			log.Printf("[{{.Name}}] failed to unmarshal body: %+v", err)
+			errCh <- newStandardError(http.StatusBadRequest, err)
+			return
+		}
+
+		// add logic here, e.g. h.service.Get(ctx, id)
+
+		resultCh <- []{{.Name}}.Data{}
 	}()
 
-	switch r.Method {
-	case http.MethodPost:
-		chanResponse := make(chan []<%= domainname %>.Data)
-		errChan := make(chan *StandardError)
-
-		go func(){
-			var body []byte
-			body, err = ioutil.ReadAll(r.Body)
-			if err != nil {
-				log.Printf("[<%= domainname %>] Failed read body: %+v \n", err)
-				errChan <- &StandardError{
-					Code:   strconv.Itoa(http.StatusBadRequest),
-					Title:  err.Error(),
-					Detail: err.Error(),
-				}
-				return
-			}
-
-			if err = json.Unmarshal([]byte(body), &postData); err != nil {
-				log.Printf("[<%= domainname %>] Failed unmarshal: %+v \n", err)
-				errChan <- &StandardError{
-					Code:   strconv.Itoa(http.StatusBadRequest),
-					Title:  err.Error(),
-					Detail: err.Error(),
-				}
-				return
-			}
-			
-			// add logic here
-			
-			result := []<%= domainname %>.Data{}
-			chanResponse <- result
-		}()
-		
-		select {
-		case <-ctx.Done():
-			if ctx.Err() == context.Canceled {
-				httpError = &StandardError{
-					Code:   strconv.Itoa(http.StatusBadRequest),
-					Title:  errBadRequest.Error(),
-					Detail: errBadRequest.Error(),
-				}
-			} else {
-				httpError = &StandardError{
-					Code:   strconv.Itoa(http.StatusGatewayTimeout),
-					Title:  errRequestTimeOut.Error(),
-					Detail: errRequestTimeOut.Error(),
-				}
-			}
-			return
-		case httpError = <-errChan:
-			return
-		case result := <-chanResponse:
-			var res FooHandlerResponse
-			res.Data.Arg = result
-			res.Header = &StandardHeader{
-			}
-			res.Status = &StandardStatus{
-				Message:   http.StatusText(http.StatusOK),
-				ErrorCode: 0,
-			}
-
-			var data []byte
-			data, err = json.Marshal(res)
-			if err != nil {
-				log.Println("[<%= domainname %>] Failed to marshal result", err)
-				httpError = &StandardError{
-					Code:   strconv.Itoa(http.StatusInternalServerError),
-					Title:  errInternalServerError.Error(),
-					Detail: errInternalServerError.Error(),
-				}
-				return
-			}
-
-			WriteResponse(w, data, http.StatusOK, NewContentTypeDecorator("application/json"))
+	select {
+	case <-ctx.Done():
+		if ctx.Err() == context.Canceled {
+			writeStandardError(w, http.StatusBadRequest, errBadRequest)
+		} else {
+			writeStandardError(w, http.StatusGatewayTimeout, errRequestTimeOut)
 		}
-	default:
-		httpError = &StandardError{
-			Code:   strconv.Itoa(http.StatusMethodNotAllowed),
-			Title:  errMethodNotAllowed.Error(),
-			Detail: errMethodNotAllowed.Error(),
+	case httpErr := <-errCh:
+		code, _ := strconv.Atoi(httpErr.Code)
+		WriteErrorResponse(w, code, []StandardError{*httpErr})
+	case result := <-resultCh:
+		var res FooHandlerResponse
+		res.Data.Arg = result
+		res.Header = &StandardHeader{}
+		res.Status = &StandardStatus{Message: http.StatusText(http.StatusOK)}
+
+		data, err := json.Marshal(res)
+		if err != nil {
+			log.Printf("[{{.Name}}] failed to marshal result: %+v", err)
+			writeStandardError(w, http.StatusInternalServerError, errInternalServerError)
+			return
 		}
-		return
+		_, _ = WriteResponse(w, data, http.StatusOK, NewContentTypeDecorator("application/json"))
 	}
 }

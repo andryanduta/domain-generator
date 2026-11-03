@@ -1,3 +1,4 @@
+// Package store implements the {{.Name}} persistent store.
 package store
 
 import (
@@ -7,27 +8,29 @@ import (
 
 	"github.com/jmoiron/sqlx"
 
-	"github.com/yourreponame/yourpath/<%= domainname %>/service"
+	"{{.ImportPath}}/service"
 )
 
-// Store denotes <%= domainname %> persistent store.
+// Store is the {{.Name}} persistent store.
 type Store struct {
+	// add your DB connection manager here
 }
 
-// NewStore creates new <%= domainname %> persistent store.
+// NewStore creates a new {{.Name}} persistent store.
 func NewStore() *Store {
-	return &Store{
-	}
+	return &Store{}
 }
+
+var _ service.Store = (*Store)(nil)
 
 type storeClient struct {
 	q            Querier
 	isExternalTx bool
 }
 
-//go:generate mockgen -destination ../mockstore/mock_store_test.go -package mockstore github.com/yourreponame/yourpath/<%= domainname %>/store Querier
+//go:generate mockgen -destination=mock_querier_test.go -package=store {{.ImportPath}}/store Querier
 
-// Querier provides mechanism to do query
+// Querier runs queries against a DB connection or transaction.
 type Querier interface {
 	Query(query string, args ...interface{}) (*sql.Rows, error)
 	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
@@ -43,49 +46,44 @@ func (s *Store) NewClient(usingTx bool) (service.StoreClient, error) {
 	// 	return nil, err
 	// }
 	// q = db
-
+	//
 	// if usingTx {
-	// 	q, err = db.Begin()
+	// 	q, err = db.Beginx()
 	// 	if err != nil {
 	// 		return nil, err
 	// 	}
 	// }
 
-	return &storeClient{
-		q: q,
-	}, nil
+	return &storeClient{q: q}, nil
 }
 
-// NewClientWithTx creates a store client with the transaction defined outside <%= domainname %>.
+// NewClientWithTx creates a store client that uses a transaction owned by the caller.
 func (s *Store) NewClientWithTx(tx *sqlx.Tx) service.StoreClient {
-	return &storeClient{
-		q:            tx,
-		isExternalTx: true,
-	}
+	return &storeClient{q: tx, isExternalTx: true}
 }
 
-// Commit wraps sqlx's transaction Commit function.
+// Commit commits the client's transaction. It is a no-op for caller-owned transactions.
 func (sc *storeClient) Commit() error {
-	if tx, ok := sc.q.(*sqlx.Tx); ok {
-		if sc.isExternalTx {
-			return nil
-		}
-		return tx.Commit()
+	tx, ok := sc.q.(*sqlx.Tx)
+	if !ok {
+		return errors.New("cannot commit on a non-transactional connection")
 	}
-
-	return errors.New("cannot do commit on non-transactional connection")
+	if sc.isExternalTx {
+		return nil
+	}
+	return tx.Commit()
 }
 
-// Rollback wraps sqlx's transaction Rollback function.
+// Rollback rolls back the client's transaction. It is a no-op for caller-owned transactions.
 func (sc *storeClient) Rollback() error {
-	if tx, ok := sc.q.(*sqlx.Tx); ok {
-		if sc.isExternalTx {
-			return nil
-		}
-		return tx.Rollback()
+	tx, ok := sc.q.(*sqlx.Tx)
+	if !ok {
+		return errors.New("cannot roll back on a non-transactional connection")
 	}
-
-	return errors.New("cannot do rollback on non-transactional connection")
+	if sc.isExternalTx {
+		return nil
+	}
+	return tx.Rollback()
 }
 
-//TODO: add store function here
+// TODO: add store methods here

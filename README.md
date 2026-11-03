@@ -1,74 +1,125 @@
-# Golang Domain Generator
-A Go tool for automatically generating domain-driven design (DDD) based domain services. 
+# domain-generator
 
-The Domain Generator tool helps you quickly create a domain service structure, minimizing the need for repetitive boilerplate code. By using this tool, you can define the domain, service, store, and handler components more efficiently.
+[![CI](https://github.com/andryanduta/domain-generator/actions/workflows/ci.yml/badge.svg)](https://github.com/andryanduta/domain-generator/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/andryanduta/domain-generator.svg)](https://pkg.go.dev/github.com/andryanduta/domain-generator)
 
-## Features
-- Automatically generates domain services.
-- Supports the creation of optional store and handler components.
-- Easily configurable with interactive prompts for adding handlers and stores
+Scaffold a DDD-style Go domain package in one command, for people **and for AI coding agents**.
 
-## Architecture
-```
-domain-name
-├── domain-name.go: The main domain abstraction file.
-├── service
-  ├── service.go: The service file for the domain.
-├── store
-  ├── store.go: The database store implementation.
-  ├── cachestore.go: The cache store implementation.
-├── handler
-  ├── http
-    ├── http.go: Main HTTP handler.
-    ├── foo_handler.go: Example HTTP handler.
-    ├── error.go: Error handling for HTTP requests.
+```console
+$ domain-generator -name order -store -http
+Created /src/shop/order (example.com/shop/order):
+  AGENTS.md
+  handler/http/error.go
+  handler/http/foo_handler.go
+  handler/http/http.go
+  handler/http/util.go
+  order.go
+  service/service.go
+  store/store.go
+
+Next: go get github.com/jmoiron/sqlx
 ```
 
-## Installation
+## Why use a generator when you have an AI agent?
 
-To install the tool, run:
+Agents are good at business logic and bad at consistency. Ask one for "a new domain" ten times
+and you get ten slightly different layouts, and you pay tokens for boilerplate each time.
+domain-generator handles the part that should never vary:
 
-```
+- **Deterministic.** The same flags always produce the same files. Every `.go` file is gofmt'ed,
+  and CI checks that every layer combination compiles and passes `go vet`.
+- **Agent-native.** Run it as an [MCP](https://modelcontextprotocol.io) server (`domain-generator mcp`)
+  so Claude Code, Cursor, Codex and other agents can call `generate_domain` as a tool. There's also
+  an [Agent Skill](skills/domain-generator/SKILL.md) and `-json` / `-dry-run` output for scripts.
+- **Leaves instructions behind.** Each generated domain includes an `AGENTS.md` with its layer
+  rules, so the agent (or teammate) filling in the TODOs keeps the architecture intact.
+- **Safe.** It validates the name, never overwrites an existing directory, and writes atomically,
+  so a failed run leaves nothing behind.
+
+## Install
+
+```console
 $ go install github.com/andryanduta/domain-generator@latest
 ```
 
+Requires Go 1.25 or later.
+
 ## Usage
-Basic command
-```
-$ domain-generator -name [domain_name]
-```
 
-Example
-To generate a domain for usermanager, run the following command:
-```
-$ domain-generator -name usermanager
-```
-This will create the directory usermanager/ with the appropriate Go files. After the generator runs, you will be prompted to decide if you want to install optional components (handlers, stores, etc.) within the domain model. You can respond with Y or N (case-insensitive) for each prompt.
+Run it inside a Go module. The import path is detected from the nearest `go.mod`.
 
-Notes
-- Domain Name: The domain name cannot be empty. It must be a valid name for your domain.
-- No Overwriting: You cannot replace an existing domain directory with the same name. Ensure the domain name is unique in the current directory.
-
-### How it works
-- Domain Creation: The tool creates a domain abstraction file (domain-name.go) for the specified domain.
-- Service Generation: It generates a service file that will be used to handle business logic for the domain.
-- Store Integration: Optionally, it can generate a store (either database or cache) within the store/ directory.
-- Handler Integration: Optionally, it can create an HTTP handler structure in the handler/ directory for your domain.
-
-### Example Flow
-```
-$ domain-generator -name usermanager
-
-Domain generation in progress...
-Would you like to install the HTTP handler? (Y/N): Y
-Would you like to install the store (database)? (Y/N): Y
-Would you like to install the cache store? (Y/N): N
-
-Domain 'usermanager' has been created!
+```console
+$ domain-generator -name order                    # asks which layers to add
+$ domain-generator -name order -store -cache -http
+$ domain-generator -name order -all -dry-run -json # plan only, machine-readable
 ```
 
-## Contributing
-Feel free to contribute to the project by submitting issues, feature requests, or pull requests. If you have any improvements or suggestions, please open an issue or create a pull request.
+| Flag | Meaning |
+|---|---|
+| `-name` | Domain name: a lowercase Go identifier such as `order` or `user_profile` (required) |
+| `-store`, `-cache`, `-http` | Add the SQL store (sqlx), cache store, or HTTP handler layer |
+| `-all` | Add every layer |
+| `-dir` | Parent directory to create the domain in (default `.`) |
+| `-module` | Import path of `-dir`, if you're not inside a Go module |
+| `-no-prompt` | Never ask; generate only the layers given by flags |
+| `-dry-run` | Show what would be generated, write nothing |
+| `-json` | Print the result as JSON (implies `-no-prompt`) |
+
+## Generated layout
+
+```text
+order/
+├── AGENTS.md             layer rules for people and agents
+├── order.go              domain contract: entities + Service interface
+├── service/service.go    business logic, implements order.Service
+├── store/                optional
+│   ├── store.go          SQL store (sqlx), implements service.Store
+│   └── cachestore.go     cache store
+└── handler/http/         optional
+    ├── http.go           handler registration and scopes
+    ├── foo_handler.go    example handler with request timeout
+    ├── error.go          known errors
+    └── util.go           JSON envelope helpers
+```
+
+Dependencies point inward (handler → domain ← service ← store), with compile-time
+interface checks so drift breaks the build. `//go:generate` directives for
+[mockgen](https://github.com/uber-go/mock) are included.
+
+## Use it from an AI agent
+
+**MCP server.** Add it to your agent's MCP config. For example, with Claude Code:
+
+```console
+$ claude mcp add domain-generator -- domain-generator mcp
+```
+
+Or in any client that reads an `mcpServers` JSON config:
+
+```json
+{
+  "mcpServers": {
+    "domain-generator": { "command": "domain-generator", "args": ["mcp"] }
+  }
+}
+```
+
+The server exposes one tool, `generate_domain` (`name`, absolute `dir`, optional `module`,
+`store`, `cache`, `http`, `dry_run`), and returns the created files and any `go get` steps as
+structured output.
+
+**Agent Skill.** Copy [`skills/domain-generator`](skills/domain-generator) into your agent's skills
+directory (e.g. `~/.claude/skills/`) so the agent knows when to reach for the tool.
+
+## Development
+
+```console
+$ go test ./...       # includes compiling every generated layer combination
+$ go vet ./...
+```
+
+See [AGENTS.md](AGENTS.md) for how the code is organized and the rules for changing templates.
 
 ## License
-This project is licensed under the MIT License - see the LICENSE file for details.
+
+MIT. See [LICENSE](LICENSE).

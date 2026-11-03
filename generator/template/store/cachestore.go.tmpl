@@ -1,16 +1,13 @@
 package store
 
-import (
-)
-
-// CacheStore denotes <%= domainname %> cache store.
+// CacheStore is the {{.Name}} cache store.
 type CacheStore struct {
+	// add your cache client here
 }
 
-// NewCacheStore creates <%= domainname %> cache store.
+// NewCacheStore creates a new {{.Name}} cache store.
 func NewCacheStore() *CacheStore {
-	return &CacheStore{
-	}
+	return &CacheStore{}
 }
 
-//TODO: add cachestore function here
+// TODO: add cache store methods here

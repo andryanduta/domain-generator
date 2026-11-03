@@ -1,29 +1,32 @@
-package <%= domainname %>
+// Package {{.Name}} defines the {{.Name}} domain: its data types and the Service contract.
+package {{.Name}}
 
 import (
 	"context"
 )
 
-// Data denotes example response data
+// Data is an example {{.Name}} entity. Replace it with your own fields.
 type Data struct {
-	ID		int64	 `json:"id"`
-	ShopID 	int64	 `json:"shop_id"`
+	ID     int64 `json:"id"`
+	ShopID int64 `json:"shop_id"`
 }
 
-//go:generate mockgen -destination mockservice/mock_service_test.go -package mockservice github.com/yourreponame/yourpath/<%= domainname %> Service
-type Service interface{
-	// Example service
+//go:generate mockgen -destination=mock/service.go -package=mock {{.ImportPath}} Service
+
+// Service is the {{.Name}} domain contract implemented by the service package.
+type Service interface {
+	// Get returns one {{.Name}} entity by ID.
 	Get(ctx context.Context, id int64) (Data, error)
 }
 
 var defaultService Service
 
-// Init sets the default <%= domainname %> Service.
+// Init sets the default {{.Name}} Service.
 func Init(svc Service) {
 	defaultService = svc
 }
 
-// GetService returns the default <%= domainname %> Service.
+// GetService returns the default {{.Name}} Service.
 func GetService() Service {
 	return defaultService
 }
