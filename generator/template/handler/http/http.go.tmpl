@@ -1,27 +1,22 @@
+// Package http exposes the {{.Name}} service over HTTP.
 package http
 
 import (
 	"errors"
+	"log"
 	"net/http"
 	"time"
-	"log"
 
-	"github.com/yourreponame/yourpath/<%= domainname %>"
+	"{{.ImportPath}}"
 )
 
-var (
-	// DefaultRequestTimeout is used for context cancellation of a request
-	DefaultRequestTimeout = 5000 * time.Millisecond
+// DefaultRequestTimeout is used for context cancellation of a request.
+var DefaultRequestTimeout = 5000 * time.Millisecond
 
-	// timeFormat denotes the standard time format used in <%= domainname %> HTTP
-	// request and response
-	timeFormat = "02/01/2006 3:04 PM"
-)
-
-//handler implements handlerutil interface
-type handler struct {
-	service      <%= domainname %>.Service
-	httpHandlers     map[string]*httpHandler
+// Handler registers the {{.Name}} HTTP handlers.
+type Handler struct {
+	service      {{.Name}}.Service
+	httpHandlers map[string]*httpHandler
 }
 
 type httpHandler struct {
@@ -29,61 +24,57 @@ type httpHandler struct {
 	url     string
 }
 
-// Option set options for http handler
-type Option func(*handler)
+// Option configures a Handler.
+type Option func(*Handler)
 
-// HTTPHandlerIdentity denotes the handler identity
+// HTTPHandlerIdentity identifies a handler and the URL it serves.
 type HTTPHandlerIdentity struct {
 	ConfigName string
 	URL        string
 }
 
-// Scope denotes a shared settings.
+// Scope denotes a group of shared handler settings.
 type Scope int
 
-// The following are the known Scopes.
+// The known Scopes.
 const (
 	_ Scope = iota
 	ScopeFooHandler
 )
 
-// String returns string representation of Scope.
+// String returns the string representation of a Scope.
 func (sc Scope) String() string { return ScopeName[sc] }
 
-// ScopeName defines all known Scopes and their string representation, while ScopeValue
-// is the reverse-mapping of ScopeName. Registering new Scope is done by adding new entry in
-// both variables.
+// ScopeName maps Scopes to names; ScopeValue is the reverse mapping.
+// Register a new Scope by adding it to both.
 var (
 	ScopeName = map[Scope]string{
 		ScopeFooHandler: "FooHandler",
 	}
 
 	ScopeValue = map[string]Scope{
-	 	ScopeName[ScopeFooHandler]: ScopeFooHandler,
+		ScopeName[ScopeFooHandler]: ScopeFooHandler,
 	}
 )
 
-// ScopeSettings represents the available configurations of a Scope.
+// ScopeSettings are the configurable settings of a Scope.
 type ScopeSettings struct {
 	Timeout time.Duration
 }
 
 func getDefaultScopeSettings() map[Scope]ScopeSettings {
-	defaultSettings := make(map[Scope]ScopeSettings)
+	defaults := make(map[Scope]ScopeSettings, len(ScopeValue))
 	for _, scope := range ScopeValue {
-		defaultSettings[scope] = ScopeSettings{
-			Timeout: DefaultRequestTimeout,
-		}
+		defaults[scope] = ScopeSettings{Timeout: DefaultRequestTimeout}
 	}
-	return defaultSettings
+	return defaults
 }
 
-// WithHandler registers a handler to <%= domainname %> service with its identity
-// and the scope settings.
-func WithHandler(httpIdentity HTTPHandlerIdentity, settings map[Scope]ScopeSettings) Option {
-	return Option(func(h *handler) {
+// WithHandler registers a handler with its identity and scope settings.
+func WithHandler(identity HTTPHandlerIdentity, settings map[Scope]ScopeSettings) Option {
+	return func(h *Handler) {
 		if h.httpHandlers == nil {
-			h.httpHandlers = make(map[string]*httpHandler, 0)
+			h.httpHandlers = make(map[string]*httpHandler)
 		}
 
 		scopes := getDefaultScopeSettings()
@@ -94,67 +85,52 @@ func WithHandler(httpIdentity HTTPHandlerIdentity, settings map[Scope]ScopeSetti
 			scopes[key] = s
 		}
 
-		newHandler, err := h.createHandler(httpIdentity.ConfigName, scopes)
+		newHandler, err := h.createHandler(identity.ConfigName, scopes)
 		if err != nil {
-			log.Fatalln("[<%= domainname %>] Unable to create handler", err)
+			log.Fatalln("[{{.Name}}] unable to create handler:", err)
 		}
 
-		h.httpHandlers[httpIdentity.ConfigName] = &httpHandler{
-			handler: newHandler,
-			url:     httpIdentity.URL,
-		}
-	})
+		h.httpHandlers[identity.ConfigName] = &httpHandler{handler: newHandler, url: identity.URL}
+	}
 }
 
-// New creates new http handler
-func New(svc <%= domainname %>.Service, options ...Option) *handler {
-	handler := &handler{
-		service:   svc,
-	}
-
-	// Apply options
+// New creates a {{.Name}} HTTP Handler.
+func New(svc {{.Name}}.Service, options ...Option) *Handler {
+	h := &Handler{service: svc}
 	for _, opt := range options {
-		opt(handler)
+		opt(h)
 	}
-
-	return handler
+	return h
 }
 
-// createHandler create http handler object
-func (h *handler) createHandler(configName string, scopes map[Scope]ScopeSettings) (http.Handler, error) {
-	var newhandler http.Handler
-
+func (h *Handler) createHandler(configName string, scopes map[Scope]ScopeSettings) (http.Handler, error) {
 	switch configName {
 	case ExampleHandler.ConfigName:
-	newhandler = &FooHandler{
-		service:   h.service,
-		scopes:    scopes,
-	}
+		return &FooHandler{service: h.service, scopes: scopes}, nil
 	default:
-		return newhandler, errInvalidConfig
+		return nil, errInvalidConfig
 	}
-	return newhandler, nil
 }
 
-//GetIdentity returns handler identity
-func (h *handler) GetIdentity() string {
-	return "<%= domainname %>-httphandler"
+// GetIdentity returns the handler identity.
+func (h *Handler) GetIdentity() string {
+	return "{{.Name}}-httphandler"
 }
 
-//Start will start all http handlers
-func (h *handler) Start() error {
-	for _, httpHandler := range h.httpHandlers {
-		http.Handle(httpHandler.url, httpHandler.handler)
+// Start registers all handlers on http.DefaultServeMux.
+func (h *Handler) Start() error {
+	for _, hh := range h.httpHandlers {
+		http.Handle(hh.url, hh.handler)
 	}
 	return nil
 }
 
 var (
-	errInvalidConfig = errors.New("error invalid config")
+	errInvalidConfig = errors.New("invalid handler config")
 
-	// ExampleHandler denotes <%= domainname %>'s example handler 
+	// ExampleHandler is the identity of the example {{.Name}} handler.
 	ExampleHandler = HTTPHandlerIdentity{
-	ConfigName: "example_handler",
-	URL:        "/<%= domainname %>/example",
+		ConfigName: "example_handler",
+		URL:        "/{{.Name}}/example",
 	}
 )

@@ -1,299 +1,263 @@
+// Package generator scaffolds a DDD-style Go domain package: a domain contract, a service,
+// and optional store, cache store and HTTP handler layers.
+//
+// Output is deterministic: the same Options always produce the same files, every generated
+// .go file is gofmt'ed, and the generated code compiles. That makes it safe to call from
+// scripts, CI and AI coding agents (see the mcp subcommand).
 package generator
 
 import (
-	"bufio"
-	_ "embed"
+	"bytes"
+	"embed"
+	"errors"
 	"fmt"
+	"go/format"
+	"go/token"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
+	"text/template"
 )
 
-// Embed the template files
-//go:embed template/domain.go.tmpl
-var domainTemplate string
+//go:embed all:template
+var templateFS embed.FS
 
-//go:embed template/service.go.tmpl
-var serviceTemplate string
+// Options describes the domain to generate.
+type Options struct {
+	// Name of the domain. It becomes the directory and the Go package name, so it must be a
+	// lowercase Go identifier (for example "order" or "user_profile").
+	Name string `json:"name"`
+	// Dir is the parent directory the domain directory is created in. Defaults to ".".
+	Dir string `json:"dir,omitempty"`
+	// Module is the import path of Dir. When empty it is detected from the nearest go.mod.
+	Module string `json:"module,omitempty"`
+	// Store adds a SQL store layer (store/store.go) using sqlx.
+	Store bool `json:"store,omitempty"`
+	// Cache adds a cache store layer (store/cachestore.go).
+	Cache bool `json:"cache,omitempty"`
+	// HTTP adds an HTTP handler layer (handler/http).
+	HTTP bool `json:"http,omitempty"`
+	// DryRun renders and validates everything but writes nothing.
+	DryRun bool `json:"dry_run,omitempty"`
+}
 
-//go:embed template/store/store.go.tmpl
-var storeTemplate string
+// Result reports what was (or, for a dry run, would be) generated.
+type Result struct {
+	Name       string   `json:"name"`
+	Dir        string   `json:"dir"`
+	ImportPath string   `json:"import_path"`
+	Files      []string `json:"files"`
+	DryRun     bool     `json:"dry_run"`
+	// NeedsDeps lists modules the generated code imports that the caller may need to `go get`.
+	NeedsDeps []string `json:"needs_deps,omitempty"`
+}
 
-//go:embed template/store/cachestore.go.tmpl
-var storeCacheTemplate string
+var (
+	// ErrExists is returned when the domain directory already exists.
+	ErrExists = errors.New("domain directory already exists")
+	// ErrNoModule is returned when no import path is given and no go.mod is found.
+	ErrNoModule = errors.New("no go.mod found: run inside a Go module or pass a module import path")
 
-//go:embed template/handler/http/http.go.tmpl
-var httpHandlerTemplate string
+	nameRE = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+)
 
-//go:embed template/handler/http/error.go.tmpl
-var httpErrorTemplate string
-
-//go:embed template/handler/http/foo_handler.go.tmpl
-var httpFooHandlerTemplate string
-
-//go:embed template/handler/http/util.go.tmpl
-var httpUtilTemplate string
-
-// GenerateDomain creates the domain abstraction, service, store, and handler directories and files in the current working directory.
-func GenerateDomain(domainName string) error {
-	if domainName == "" {
-		return fmt.Errorf("domain name cannot be empty")
+// ValidateName reports whether name can be used as a domain directory and Go package name.
+func ValidateName(name string) error {
+	switch {
+	case name == "":
+		return errors.New("domain name is required")
+	case !nameRE.MatchString(name):
+		return fmt.Errorf("invalid domain name %q: use lowercase letters, digits and underscores, starting with a letter", name)
+	case token.IsKeyword(name):
+		return fmt.Errorf("invalid domain name %q: it is a Go keyword", name)
+	case name == "main" || name == "internal" || name == "vendor" || name == "testdata":
+		return fmt.Errorf("invalid domain name %q: reserved by the Go toolchain", name)
 	}
+	return nil
+}
 
-	// Get the user's current working directory
-	currentDir, err := os.Getwd()
+// DetectModule returns the import path of dir by finding the nearest go.mod above it.
+func DetectModule(dir string) (string, error) {
+	abs, err := filepath.Abs(dir)
 	if err != nil {
-		return fmt.Errorf("failed to get current working directory: %v", err)
+		return "", err
 	}
-
-	basePath := filepath.Join(currentDir, domainName)
-
-	if _, err := os.Stat(basePath); !os.IsNotExist(err) {
-		return fmt.Errorf("domain already exists in the current directory")
-	}
-
-	// Create domain abstraction
-	createDir(basePath)
-	outputFile := filepath.Join(basePath, domainName+".go")
-	generateFileFromTemplate(domainTemplate, outputFile, domainName)
-	fmt.Println("Domain abstraction has been created!")
-
-	// Create service
-	servicePath := filepath.Join(basePath, "service")
-	createDir(servicePath)
-	outputFile = filepath.Join(servicePath, "service.go")
-	generateFileFromTemplate(serviceTemplate, outputFile, domainName)
-
-	fmt.Println("Domain service has been created!")
-
-	// Initialize store
-	if err := StoreInit(basePath, domainName, servicePath); err != nil {
-		return err
-	}
-
-	// Initialize handler
-	if err := HandlerInit(basePath, domainName); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// StoreInit initializes the store directory and files, including DB store, cache store, and BT store.
-func StoreInit(basePath, domainName, servicePath string) error {
-	reader := bufio.NewReader(os.Stdin)
-	storePath := filepath.Join(basePath, "store")
-	createDir(storePath)
-	fmt.Println("Store directory has been created!")
-
-	for _, storeType := range []string{"database store", "cache store"} {
-		if prompt(fmt.Sprintf("Do you wish to install the %s? (Y/N): ", storeType), reader) {
-
-			switch storeType {
-			case "database store":
-				// Generate DB store files
-				outputFile := filepath.Join(storePath, "store.go")
-				generateFileFromTemplate(storeTemplate, outputFile, domainName)
-
-				// Append DB store to service file
-				if err := appendStoreToService("store", servicePath, domainName); err != nil {
-					return fmt.Errorf("failed to append DB store to service: %v", err)
-				}
-
-			case "cache store":
-				// Generate Cache store files
-				outputFile := filepath.Join(storePath, "cachestore.go")
-				generateFileFromTemplate(storeCacheTemplate, outputFile, domainName)
-
-				// Append Cache store to service file
-				if err := appendStoreToService("cacheStore", servicePath, domainName); err != nil {
-					return fmt.Errorf("failed to append Cache store to service: %v", err)
-				}
+	for cur := abs; ; cur = filepath.Dir(cur) {
+		data, err := os.ReadFile(filepath.Join(cur, "go.mod"))
+		if err == nil {
+			modPath := modulePath(data)
+			if modPath == "" {
+				return "", fmt.Errorf("%s: no module directive", filepath.Join(cur, "go.mod"))
 			}
-
-			fmt.Printf("%s has been created!\n", storeType)
+			rel, err := filepath.Rel(cur, abs)
+			if err != nil {
+				return "", err
+			}
+			return path.Join(modPath, filepath.ToSlash(rel)), nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		if filepath.Dir(cur) == cur {
+			return "", ErrNoModule
 		}
 	}
-	return nil
 }
 
-// HandlerInit initializes the handler directory and files.
-func HandlerInit(basePath, domainName string) error {
-	reader := bufio.NewReader(os.Stdin)
-	handlerPath := filepath.Join(basePath, "handler")
-	createDir(handlerPath)
-	fmt.Println("Handler directory has been created!")
+type templateData struct {
+	Name       string
+	ImportPath string
+	Store      bool
+	Cache      bool
+	HTTP       bool
+}
 
-	for _, handlerType := range []string{"HTTP handler"} {
-		if prompt(fmt.Sprintf("Do you wish to install the %s? (Y/N): ", handlerType), reader) {
-
-			switch handlerType {
-			case "HTTP handler":
-				httpPath := filepath.Join(handlerPath, "http")
-				createDir(httpPath)
-
-				// Generate http files
-				outputFile := filepath.Join(httpPath, "http.go")
-				generateFileFromTemplate(httpHandlerTemplate, outputFile, domainName)
-
-				outputFile = filepath.Join(httpPath, "error.go")
-				generateFileFromTemplate(httpErrorTemplate, outputFile, domainName)
-
-				outputFile = filepath.Join(httpPath, "foo_handler.go")
-				generateFileFromTemplate(httpFooHandlerTemplate, outputFile, domainName)
-
-				outputFile = filepath.Join(httpPath, "util.go")
-				generateFileFromTemplate(httpUtilTemplate, outputFile, domainName)
-			}
-
-			fmt.Printf("%s has been created!\n", handlerType)
+// modulePath returns the module path declared in go.mod content, or "" if there is none.
+func modulePath(gomod []byte) string {
+	for _, line := range strings.Split(string(gomod), "\n") {
+		line = strings.TrimSpace(line)
+		if i := strings.Index(line, "//"); i >= 0 {
+			line = strings.TrimSpace(line[:i])
 		}
+		rest, ok := strings.CutPrefix(line, "module")
+		if !ok || (rest != "" && rest[0] != ' ' && rest[0] != '	') {
+			continue
+		}
+		return strings.Trim(strings.TrimSpace(rest), "\"`")
 	}
-	return nil
+	return ""
 }
 
-func prompt(question string, reader *bufio.Reader) bool {
-	fmt.Print(question)
-	answer, _ := reader.ReadString('\n')
-	answer = strings.TrimSpace(strings.ToLower(answer))
-	return answer == "y" || answer == "yes"
+type fileSpec struct {
+	tmpl    string
+	out     string
+	include func(templateData) bool
 }
 
-func createDir(path string) {
-	if err := os.MkdirAll(path, 0755); err != nil {
-		fmt.Printf("Error creating directory %s: %v\n", path, err)
-		os.Exit(1)
+func always(templateData) bool { return true }
+
+var files = []fileSpec{
+	{"template/domain.go.tmpl", "{{.Name}}.go", always},
+	{"template/AGENTS.md.tmpl", "AGENTS.md", always},
+	{"template/service.go.tmpl", "service/service.go", always},
+	{"template/store/store.go.tmpl", "store/store.go", func(d templateData) bool { return d.Store }},
+	{"template/store/cachestore.go.tmpl", "store/cachestore.go", func(d templateData) bool { return d.Cache }},
+	{"template/handler/http/http.go.tmpl", "handler/http/http.go", func(d templateData) bool { return d.HTTP }},
+	{"template/handler/http/error.go.tmpl", "handler/http/error.go", func(d templateData) bool { return d.HTTP }},
+	{"template/handler/http/foo_handler.go.tmpl", "handler/http/foo_handler.go", func(d templateData) bool { return d.HTTP }},
+	{"template/handler/http/util.go.tmpl", "handler/http/util.go", func(d templateData) bool { return d.HTTP }},
+}
+
+// Render returns the generated files (slash-separated relative path -> content) without
+// touching disk. importPath is the import path of the new domain package.
+func Render(opts Options, importPath string) (map[string][]byte, error) {
+	if err := ValidateName(opts.Name); err != nil {
+		return nil, err
 	}
-}
+	data := templateData{Name: opts.Name, ImportPath: importPath, Store: opts.Store, Cache: opts.Cache, HTTP: opts.HTTP}
 
-func createFile(filePath, content string) {
-	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
-		fmt.Printf("Error creating file %s: %v\n", filePath, err)
-		os.Exit(1)
+	out := make(map[string][]byte)
+	for _, f := range files {
+		if !f.include(data) {
+			continue
+		}
+		src, err := templateFS.ReadFile(f.tmpl)
+		if err != nil {
+			return nil, err
+		}
+		t, err := template.New(f.tmpl).Option("missingkey=error").Parse(string(src))
+		if err != nil {
+			return nil, fmt.Errorf("parse %s: %w", f.tmpl, err)
+		}
+		var buf bytes.Buffer
+		if err := t.Execute(&buf, data); err != nil {
+			return nil, fmt.Errorf("render %s: %w", f.tmpl, err)
+		}
+		content := buf.Bytes()
+		name := strings.ReplaceAll(f.out, "{{.Name}}", opts.Name)
+		if strings.HasSuffix(name, ".go") {
+			if content, err = format.Source(content); err != nil {
+				return nil, fmt.Errorf("generated %s is not valid Go (template bug): %w", name, err)
+			}
+		}
+		out[name] = content
 	}
+	return out, nil
 }
 
-func generateFileFromTemplate(templateContent, outputPath, domainName string) error {
-	content := strings.ReplaceAll(templateContent, "<%= domainname %>", domainName)
-	if err := os.WriteFile(outputPath, []byte(content), 0644); err != nil {
-		return fmt.Errorf("failed to write file %s: %w", outputPath, err)
+// Generate renders the domain and writes it to <Dir>/<Name>. It never overwrites an existing
+// directory, and writes into a temporary directory first so a failure leaves nothing behind.
+func Generate(opts Options) (Result, error) {
+	if err := ValidateName(opts.Name); err != nil {
+		return Result{}, err
 	}
-	return nil
-}
-
-func appendStoreToService(storeType, servicePath, domainName string) error {
-	serviceFile := filepath.Join(servicePath, "service.go")
-
-	// Read the service file content
-	content, err := os.ReadFile(serviceFile)
+	if opts.Dir == "" {
+		opts.Dir = "."
+	}
+	parent, err := filepath.Abs(opts.Dir)
 	if err != nil {
-		return fmt.Errorf("failed to read service file: %v", err)
+		return Result{}, err
 	}
-	lines := strings.Split(string(content), "\n")
-
-	var updatedLines []string
-	mockgenAdded := false
-	newFuncUpdated := false
-	serviceStructUpdated := false
-
-	for _, line := range lines {
-
-		// Add Stores interfaces with mockgen directives
-		if !mockgenAdded && strings.Contains(line, "//<FOR_STORE_CODE_GENERATION>") {
-			mockgenAdded = true
-			updatedLines = append(updatedLines, line)
-
-			if storeType == "store" {
-
-				updatedLines = append(updatedLines,
-					fmt.Sprintf("\n//go:generate mockgen -destination ./mock_store_test.go -package service github.com/yourreponame/yourpath/v2/%s/service Store", domainName),
-					"",
-					fmt.Sprintf("// Store denotes the %s store.", domainName),
-					"type Store interface {",
-					"\tNewClient(usingTx bool) (StoreClient, error)",
-					"\tNewClientWithTx(tx *sqlx.Tx) StoreClient",
-					"}",
-
-					"",
-					"// StoreClient provides mechanism to access persistent store.",
-					"type StoreClient interface {",
-					"\tCommit() error",
-					"\tRollback() error",
-					"\t// add your store interface here",
-					"}",
-				)
-			} else if storeType == "cacheStore" {
-
-				updatedLines = append(updatedLines,
-					fmt.Sprintf("\n//go:generate mockgen -destination ./mock_cachestore_test.go -package service github.com/yourreponame/yourpath/v2/%s/service CacheStore", domainName),
-					"",
-					fmt.Sprintf("// CacheStore provides mechanism to access %s cache store", domainName),
-					"type CacheStore interface{",
-					"\t//add your cache store interface here",
-					"}",
-				)
-			}
-			continue
-		}
-
-		// Add the store, cacheStore, or bigTable fields to the Service struct
-		if !serviceStructUpdated && strings.Contains(line, "type Service struct {") {
-			serviceStructUpdated = true
-			updatedLines = append(updatedLines, line)
-			if storeType == "store" {
-				updatedLines = append(updatedLines, "\tstore Store")
-			} else if storeType == "cacheStore" {
-				updatedLines = append(updatedLines, "\tcacheStore CacheStore")
-			}
-
-			continue
-		}
-
-		// Update the New function to include the new store parameters
-		if !newFuncUpdated && strings.Contains(line, "func New") {
-			newFuncUpdated = true
-			// Find the opening and closing parentheses of the parameter list
-			openParenIdx := strings.Index(line, "(")
-			closeParenIdx := strings.Index(line, ")")
-			beforeParen := line[:openParenIdx+1] // Everything before and including "("
-			params := strings.TrimSpace(line[openParenIdx+1 : closeParenIdx])
-			afterParen := line[closeParenIdx:] // Everything after ")"
-
-			// Append the new parameter correctly
-			if params == "" {
-				// No existing parameters
-				if storeType == "store" {
-					updatedLines = append(updatedLines, beforeParen+"store Store"+afterParen)
-				} else if storeType == "cacheStore" {
-					updatedLines = append(updatedLines, beforeParen+"cacheStore CacheStore"+afterParen)
-				}
-			} else {
-				// Existing parameters
-				if storeType == "store" {
-					updatedLines = append(updatedLines, beforeParen+params+", store Store"+afterParen)
-				} else if storeType == "cacheStore" {
-					updatedLines = append(updatedLines, beforeParen+params+", cacheStore CacheStore"+afterParen)
-				}
-			}
-			continue
-		}
-
-		// Add the store assignment to the Service struct in the New function
-		if newFuncUpdated && strings.Contains(line, "return &Service{") {
-			updatedLines = append(updatedLines, line)
-			if storeType == "store" {
-				updatedLines = append(updatedLines, "\t\tstore: store,")
-			} else if storeType == "cacheStore" {
-				updatedLines = append(updatedLines, "\t\tcacheStore: cacheStore,")
-			}
-
-			continue
-		}
-
-		// Append remaining lines unchanged
-		updatedLines = append(updatedLines, line)
+	if st, err := os.Stat(parent); err != nil || !st.IsDir() {
+		return Result{}, fmt.Errorf("output directory %s does not exist", parent)
 	}
 
-	// Write updated content back to the service file
-	return os.WriteFile(serviceFile, []byte(strings.Join(updatedLines, "\n")), 0644)
+	module := opts.Module
+	if module == "" {
+		if module, err = DetectModule(parent); err != nil {
+			return Result{}, err
+		}
+	}
+	importPath := path.Join(module, opts.Name)
+	target := filepath.Join(parent, opts.Name)
+
+	rendered, err := Render(opts, importPath)
+	if err != nil {
+		return Result{}, err
+	}
+
+	res := Result{Name: opts.Name, Dir: target, ImportPath: importPath, DryRun: opts.DryRun}
+	for name := range rendered {
+		res.Files = append(res.Files, name)
+	}
+	sort.Strings(res.Files)
+	if opts.Store {
+		res.NeedsDeps = append(res.NeedsDeps, "github.com/jmoiron/sqlx")
+	}
+
+	if _, err := os.Lstat(target); err == nil {
+		return res, fmt.Errorf("%w: %s", ErrExists, target)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return res, err
+	}
+	if opts.DryRun {
+		return res, nil
+	}
+
+	tmp, err := os.MkdirTemp(parent, "."+opts.Name+"-*")
+	if err != nil {
+		return res, err
+	}
+	defer os.RemoveAll(tmp) // no-op after a successful rename
+
+	for _, name := range res.Files {
+		p := filepath.Join(tmp, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			return res, err
+		}
+		if err := os.WriteFile(p, rendered[name], 0o644); err != nil {
+			return res, err
+		}
+	}
+	if err := os.Chmod(tmp, 0o755); err != nil {
+		return res, err
+	}
+	if err := os.Rename(tmp, target); err != nil {
+		return res, fmt.Errorf("move generated domain into place: %w", err)
+	}
+	return res, nil
 }
