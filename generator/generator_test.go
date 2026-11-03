@@ -23,6 +23,29 @@ func TestValidateName(t *testing.T) {
 	}
 }
 
+// Names that clash with identifiers in the generated code must fail validation instead of
+// producing a package that doesn't build (PR #2 review).
+func TestValidateNameRejectsTemplateIdentifiers(t *testing.T) {
+	for _, name := range []string{"logger", "row", "handle", "decode", "svc", "ctx", "msg", "got", "len", "string", "any"} {
+		if err := ValidateName(name); err == nil {
+			t.Errorf("ValidateName(%q) = nil, want an error", name)
+		}
+	}
+}
+
+// realisticNames are common domain names that must stay valid. TestRealisticNamesCompile
+// proves they build.
+var realisticNames = []string{"order", "event", "message", "item", "record", "data", "job",
+	"status", "method", "ticker", "payment", "product", "user", "invoice"}
+
+func TestValidateNameAcceptsRealisticNames(t *testing.T) {
+	for _, name := range realisticNames {
+		if err := ValidateName(name); err != nil {
+			t.Errorf("ValidateName(%q) = %v", name, err)
+		}
+	}
+}
+
 func TestModulePath(t *testing.T) {
 	cases := map[string]string{
 		"module example.com/app\n\ngo 1.22\n":     "example.com/app",
@@ -237,6 +260,37 @@ func (c combo) label() string {
 		return "core"
 	}
 	return strings.Join(parts, "+")
+}
+
+// TestRealisticNamesCompile builds every realistic name with all layers, rotating through the
+// queues, so template identifiers that would shadow a valid domain name are caught.
+func TestRealisticNamesCompile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("compiles generated code with the go tool")
+	}
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("go tool not found")
+	}
+	queues := Queues()
+	for i, name := range realisticNames {
+		opts := Options{Store: true, Cache: true, HTTP: true, Cron: true, Queue: queues[i%len(queues)]}
+		t.Run(name+"/"+opts.Queue, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			writeFile(t, filepath.Join(root, "go.mod"), "module example.com/app\n\ngo 1.25\n\n"+pinnedDeps)
+			opts.Name, opts.Dir = name, root
+			if _, err := Generate(opts); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(goBin, "vet", "./...")
+			cmd.Dir = root
+			cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off", "GOTOOLCHAIN=local")
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("go vet on generated code failed:\n%s", out)
+			}
+		})
+	}
 }
 
 // pinnedDeps pins the client libraries generated code may import, so the compile test is

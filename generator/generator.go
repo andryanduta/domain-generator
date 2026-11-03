@@ -1,5 +1,6 @@
-// Package generator scaffolds a DDD-style Go domain package: a domain contract, a service,
-// and optional store, cache store and HTTP handler layers.
+// Package generator scaffolds a DDD-style Go domain package: the domain types and Service
+// interface, a service implementation, optional sqlstore and cache adapters, and optional
+// inbound handlers (HTTP API, message-queue consumer, scheduled jobs).
 //
 // Output is deterministic: the same Options always produce the same files, every generated
 // .go file is gofmt'ed, and the generated code compiles. That makes it safe to call from
@@ -11,15 +12,20 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"go/ast"
 	"go/format"
+	"go/parser"
 	"go/token"
+	"go/types"
 	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"text/template"
 )
 
@@ -80,14 +86,160 @@ func ValidateName(name string) error {
 		return fmt.Errorf("invalid domain name %q: it is a Go keyword", name)
 	case name == "main" || name == "internal" || name == "vendor" || name == "testdata":
 		return fmt.Errorf("invalid domain name %q: reserved by the Go toolchain", name)
+	case types.Universe.Lookup(name) != nil:
+		return fmt.Errorf("invalid domain name %q: it is a predeclared Go identifier", name)
 	case reservedNames[name]:
 		return fmt.Errorf("invalid domain name %q: it clashes with a package the generated code imports", name)
+	case templateIdents()[name]:
+		return fmt.Errorf("invalid domain name %q: it clashes with an identifier in the generated code", name)
 	}
 	return nil
 }
 
-// reservedNames are package names imported by the generated code (or its own subpackages);
-// a domain with one of these names would not compile.
+// templateIdents returns the identifiers that would collide with the domain package name in
+// generated code. It renders every template with a placeholder name and collects:
+//   - package-level declarations in packages that import the domain (same block as imports);
+//   - import names in files that import the domain;
+//   - every identifier inside functions that refer to the domain package, where a parameter
+//     or local with the domain's name would shadow it.
+//
+// Deriving the set from the templates means new template identifiers are covered automatically.
+var templateIdents = sync.OnceValue(func() map[string]bool {
+	const ph = "zzdomainplaceholder"
+	importPath := "example.com/m/" + ph
+	isOurs := func(s string) bool { return strings.Contains(strings.ToLower(s), ph) }
+	idents := make(map[string]bool)
+	add := func(name string) {
+		if nameRE.MatchString(name) && !isOurs(name) {
+			idents[name] = true
+		}
+	}
+
+	variants := []Options{{Name: ph, Store: true, Cache: true, HTTP: true, Cron: true}}
+	for _, q := range Queues() {
+		variants = append(variants, Options{Name: ph, Store: true, Cache: true, HTTP: true, Cron: true, Queue: q})
+	}
+	for _, opts := range variants {
+		out, err := render(opts, importPath)
+		if err != nil {
+			panic(fmt.Sprintf("domain-generator: templates do not render: %v", err)) // covered by tests
+		}
+		files := make(map[string][]*ast.File) // package dir -> parsed files
+		importers := make(map[string]bool)    // package dirs with a file importing the domain
+		for name, src := range out {
+			if !strings.HasSuffix(name, ".go") {
+				continue
+			}
+			f, err := parser.ParseFile(token.NewFileSet(), name, src, parser.SkipObjectResolution)
+			if err != nil {
+				panic(fmt.Sprintf("domain-generator: %s does not parse: %v", name, err))
+			}
+			dir := path.Dir(name)
+			files[dir] = append(files[dir], f)
+			if !importsPath(f, importPath) {
+				continue
+			}
+			importers[dir] = true
+			for _, imp := range f.Imports {
+				if imp.Name != nil {
+					add(imp.Name.Name)
+				} else if p, err := strconv.Unquote(imp.Path.Value); err == nil {
+					add(path.Base(p))
+				}
+			}
+			for _, decl := range f.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok || !refersTo(fn, ph) {
+					continue
+				}
+				localIdents(fn, add)
+			}
+		}
+		for dir := range importers {
+			for _, f := range files[dir] {
+				packageLevelNames(f, add)
+			}
+		}
+	}
+	return idents
+})
+
+func importsPath(f *ast.File, importPath string) bool {
+	for _, imp := range f.Imports {
+		if p, err := strconv.Unquote(imp.Path.Value); err == nil && p == importPath {
+			return true
+		}
+	}
+	return false
+}
+
+// refersTo reports whether n uses the qualifier pkg (as in pkg.Name).
+func refersTo(n ast.Node, pkg string) bool {
+	found := false
+	ast.Inspect(n, func(n ast.Node) bool {
+		if sel, ok := n.(*ast.SelectorExpr); ok {
+			if x, ok := sel.X.(*ast.Ident); ok && x.Name == pkg {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// localIdents reports the identifiers in fn that could shadow a package name: everything
+// except selectors (x.Name), struct literal keys and struct field names.
+func localIdents(fn *ast.FuncDecl, add func(string)) {
+	skip := make(map[*ast.Ident]bool)
+	ast.Inspect(fn, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.SelectorExpr:
+			skip[n.Sel] = true
+		case *ast.KeyValueExpr:
+			if k, ok := n.Key.(*ast.Ident); ok {
+				skip[k] = true
+			}
+		case *ast.StructType:
+			for _, f := range n.Fields.List {
+				for _, name := range f.Names {
+					skip[name] = true
+				}
+			}
+		case *ast.Ident:
+			if !skip[n] {
+				add(n.Name)
+			}
+		}
+		return true
+	})
+	add(fn.Name.Name)
+}
+
+// packageLevelNames reports the package-level declarations in f (methods excluded).
+func packageLevelNames(f *ast.File, add func(string)) {
+	for _, decl := range f.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			if d.Recv == nil {
+				add(d.Name.Name)
+			}
+		case *ast.GenDecl:
+			for _, spec := range d.Specs {
+				switch sp := spec.(type) {
+				case *ast.TypeSpec:
+					add(sp.Name.Name)
+				case *ast.ValueSpec:
+					for _, n := range sp.Names {
+						add(n.Name)
+					}
+				}
+			}
+		}
+	}
+}
+
+// reservedNames are package names the generated code may import (or its own subpackages).
+// Most are also found by templateIdents; listing them keeps the error message specific.
 var reservedNames = map[string]bool{
 	"service": true, "sqlstore": true, "cache": true, "httpapi": true,
 	"context": true, "errors": true, "fmt": true, "strings": true, "strconv": true, "sync": true,
@@ -273,6 +425,11 @@ func Render(opts Options, importPath string) (map[string][]byte, error) {
 	if err := validateOptions(opts); err != nil {
 		return nil, err
 	}
+	return render(opts, importPath)
+}
+
+// render is Render without validation; templateIdents uses it with a placeholder name.
+func render(opts Options, importPath string) (map[string][]byte, error) {
 	data := newTemplateData(opts, importPath)
 
 	out := make(map[string][]byte)
