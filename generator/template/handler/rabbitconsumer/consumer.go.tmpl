@@ -1,0 +1,68 @@
+// Package rabbitconsumer consumes {{.Name}} messages from RabbitMQ
+// (github.com/rabbitmq/amqp091-go).
+//
+// Wire it in main (with manual acks):
+//
+//	deliveries, _ := ch.ConsumeWithContext(ctx, "{{.Route}}.create", "{{.Name}}-service", false, false, false, false, nil)
+//	err := rabbitconsumer.New(logger, svc).Run(ctx, deliveries)
+//
+// Permanent failures are rejected without requeue; configure a dead-letter exchange on the queue
+// to keep them. Retryable failures are requeued; consider a delayed retry queue for backoff.
+package rabbitconsumer
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"time"
+
+	amqp "github.com/rabbitmq/amqp091-go"
+
+	"{{.ImportPath}}"
+)
+
+// Consumer processes RabbitMQ deliveries.
+type Consumer struct {
+	logger  *slog.Logger
+	svc     {{.Name}}.Service
+	timeout time.Duration
+}
+
+// New returns a Consumer with a 30 s per-message timeout.
+func New(logger *slog.Logger, svc {{.Name}}.Service) *Consumer {
+	return &Consumer{logger: logger, svc: svc, timeout: 30 * time.Second}
+}
+
+// Run handles deliveries until ctx is cancelled or the channel closes.
+func (c *Consumer) Run(ctx context.Context, deliveries <-chan amqp.Delivery) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case d, ok := <-deliveries:
+			if !ok {
+				return errors.New("delivery channel closed")
+			}
+			c.process(ctx, d)
+		}
+	}
+}
+
+func (c *Consumer) process(ctx context.Context, d amqp.Delivery) {
+	hctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+
+	err := handle(hctx, c.svc, d.Body)
+	switch {
+	case err == nil:
+		if err := d.Ack(false); err != nil {
+			c.logger.ErrorContext(ctx, "ack failed", "delivery_tag", d.DeliveryTag, "error", err)
+		}
+	case errors.Is(err, errPermanent):
+		c.logger.WarnContext(ctx, "rejecting {{.Name}} message", "delivery_tag", d.DeliveryTag, "error", err)
+		_ = d.Nack(false, false) // to the dead-letter exchange, if configured
+	default:
+		c.logger.ErrorContext(ctx, "requeueing {{.Name}} message", "delivery_tag", d.DeliveryTag, "error", err)
+		_ = d.Nack(false, true)
+	}
+}

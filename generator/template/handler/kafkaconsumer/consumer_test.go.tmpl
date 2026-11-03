@@ -1,0 +1,75 @@
+package kafkaconsumer
+
+import (
+	"context"
+	"io"
+	"log/slog"
+	"testing"
+	"time"
+
+	"github.com/segmentio/kafka-go"
+
+	"{{.ImportPath}}"
+)
+
+// fakeReader serves msgs in order. When they run out it calls done, so Run returns.
+type fakeReader struct {
+	msgs      []kafka.Message
+	committed []int64
+	done      context.CancelFunc
+}
+
+func (r *fakeReader) FetchMessage(ctx context.Context) (kafka.Message, error) {
+	if len(r.msgs) == 0 {
+		r.done()
+		<-ctx.Done()
+		return kafka.Message{}, ctx.Err()
+	}
+	m := r.msgs[0]
+	r.msgs = r.msgs[1:]
+	return m, nil
+}
+
+func (r *fakeReader) CommitMessages(_ context.Context, msgs ...kafka.Message) error {
+	for _, m := range msgs {
+		r.committed = append(r.committed, m.Offset)
+	}
+	return nil
+}
+
+// flakyService fails Create a fixed number of times before succeeding.
+type flakyService struct {
+	fakeService
+	failures int
+}
+
+func (f *flakyService) Create(ctx context.Context, in {{.Name}}.{{.Type}}) ({{.Name}}.{{.Type}}, error) {
+	if f.failures > 0 {
+		f.failures--
+		return {{.Name}}.{{.Type}}{}, errUnavailable
+	}
+	return f.fakeService.Create(ctx, in)
+}
+
+func TestRunRetriesAndCommits(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	r := &fakeReader{done: cancel, msgs: []kafka.Message{
+		{Offset: 1, Value: []byte(`{"name":"a"}`)}, // retried twice, then succeeds
+		{Offset: 2, Value: []byte(`not json`)},     // permanent: skipped but committed
+		{Offset: 3, Value: []byte(`{"name":"c"}`)},
+	}}
+	svc := &flakyService{failures: 2}
+	c := New(slog.New(slog.NewTextHandler(io.Discard, nil)), svc, r)
+	c.minBackoff, c.maxBackoff = time.Millisecond, time.Millisecond
+
+	if err := c.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.committed; len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 3 {
+		t.Fatalf("committed offsets = %v, want [1 2 3]", got)
+	}
+	if len(svc.created) != 2 {
+		t.Fatalf("created %d messages, want 2", len(svc.created))
+	}
+}

@@ -1,0 +1,60 @@
+package {{.QueuePkg}}
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"{{.ImportPath}}"
+)
+
+// fakeService is a minimal {{.Name}}.Service for consumer tests.
+type fakeService struct {
+	created []{{.Name}}.{{.Type}}
+	err     error // returned by Create when set
+}
+
+func (f *fakeService) Get(context.Context, int64) ({{.Name}}.{{.Type}}, error) {
+	return {{.Name}}.{{.Type}}{}, {{.Name}}.ErrNotFound
+}
+
+func (f *fakeService) Create(_ context.Context, in {{.Name}}.{{.Type}}) ({{.Name}}.{{.Type}}, error) {
+	if f.err != nil {
+		return {{.Name}}.{{.Type}}{}, f.err
+	}
+	if strings.TrimSpace(in.Name) == "" {
+		return {{.Name}}.{{.Type}}{}, {{.Name}}.ErrInvalid
+	}
+	f.created = append(f.created, in)
+	return in, nil
+}
+
+var errUnavailable = errors.New("database unavailable")
+
+func TestHandleClassifiesErrors(t *testing.T) {
+	tests := []struct {
+		name          string
+		body          string
+		svcErr        error
+		wantErr       bool
+		wantPermanent bool
+	}{
+		{"valid", `{"name":"example"}`, nil, false, false},
+		{"unknown fields are ignored", `{"name":"example","extra":1}`, nil, false, false},
+		{"malformed JSON is permanent", `{"name":`, nil, true, true},
+		{"invalid input is permanent", `{"name":""}`, nil, true, true},
+		{"infrastructure error is retryable", `{"name":"example"}`, errUnavailable, true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := handle(context.Background(), &fakeService{err: tt.svcErr}, []byte(tt.body))
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("handle error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if errors.Is(err, errPermanent) != tt.wantPermanent {
+				t.Fatalf("permanent = %v, want %v (err %v)", errors.Is(err, errPermanent), tt.wantPermanent, err)
+			}
+		})
+	}
+}

@@ -1,0 +1,57 @@
+// Package nsqconsumer consumes {{.Name}} messages from NSQ (github.com/nsqio/go-nsq).
+//
+// Wire it in main:
+//
+//	c, _ := nsq.NewConsumer("{{.Route}}.create", "{{.Name}}-service", nsq.NewConfig())
+//	c.AddHandler(nsqconsumer.New(logger, svc))
+//	_ = c.ConnectToNSQLookupd(lookupdAddr)
+package nsqconsumer
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"time"
+
+	"github.com/nsqio/go-nsq"
+
+	"{{.ImportPath}}"
+)
+
+// MaxAttempts is how many deliveries a message gets before it is dropped as a poison pill.
+const MaxAttempts = 5
+
+// Handler implements nsq.Handler. Retryable errors are returned so NSQ requeues the message
+// with backoff; permanent errors and exhausted attempts are logged and finished.
+type Handler struct {
+	logger  *slog.Logger
+	svc     {{.Name}}.Service
+	timeout time.Duration
+}
+
+var _ nsq.Handler = (*Handler)(nil)
+
+// New returns a Handler that processes each message with a 30 s timeout.
+func New(logger *slog.Logger, svc {{.Name}}.Service) *Handler {
+	return &Handler{logger: logger, svc: svc, timeout: 30 * time.Second}
+}
+
+// HandleMessage implements nsq.Handler.
+func (h *Handler) HandleMessage(m *nsq.Message) error {
+	ctx, cancel := context.WithTimeout(context.Background(), h.timeout)
+	defer cancel()
+
+	err := handle(ctx, h.svc, m.Body)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, errPermanent):
+		h.logger.WarnContext(ctx, "dropping {{.Name}} message", "id", string(m.ID[:]), "error", err)
+		return nil
+	case m.Attempts >= MaxAttempts:
+		h.logger.ErrorContext(ctx, "giving up on {{.Name}} message", "id", string(m.ID[:]), "attempts", m.Attempts, "error", err)
+		return nil
+	default:
+		return err // NSQ requeues with backoff
+	}
+}

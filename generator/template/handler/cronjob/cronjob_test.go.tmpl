@@ -1,0 +1,45 @@
+package cronjob
+
+import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func TestRunRepeatsAndStops(t *testing.T) {
+	var runs atomic.Int32
+	jobs := []Job{
+		{Name: "counter", Every: 5 * time.Millisecond, Run: func(context.Context) error { runs.Add(1); return nil }},
+		{Name: "failing", Every: 5 * time.Millisecond, Run: func(context.Context) error { return errors.New("boom") }},
+		{Name: "panicking", Every: 5 * time.Millisecond, Run: func(context.Context) error { panic("boom") }},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		Run(ctx, slog.New(slog.NewTextHandler(io.Discard, nil)), jobs...)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not stop after the context was cancelled")
+	}
+	if runs.Load() < 2 {
+		t.Fatalf("counter ran %d times, want at least 2", runs.Load())
+	}
+}
+
+func TestJobsAreValid(t *testing.T) {
+	for _, j := range Jobs(nil) {
+		if j.Name == "" || j.Every <= 0 || j.Run == nil {
+			t.Errorf("invalid job %+v", j)
+		}
+	}
+}

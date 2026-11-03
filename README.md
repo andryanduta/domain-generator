@@ -9,10 +9,10 @@ Scaffold a DDD-style Go domain package in one command, for people **and for AI c
 $ domain-generator -name order -store -http
 Created /src/shop/order (example.com/shop/order):
   AGENTS.md
-  httpapi/handlers.go
-  httpapi/handlers_test.go
-  httpapi/respond.go
-  httpapi/routes.go
+  handler/httpapi/handlers.go
+  handler/httpapi/handlers_test.go
+  handler/httpapi/respond.go
+  handler/httpapi/routes.go
   order.go
   service/service.go
   service/service_test.go
@@ -52,14 +52,18 @@ Run it inside a Go module. The import path is detected from the nearest `go.mod`
 ```console
 $ domain-generator -name order                          # asks which layers to add
 $ domain-generator -name order -dir internal -all       # recommended for applications
+$ domain-generator -name order -all -queue kafka        # plus a Kafka consumer
 $ domain-generator -name order -all -dry-run -json      # plan only, machine-readable
 ```
 
 | Flag | Meaning |
 |---|---|
 | `-name` | Domain name: a lowercase Go identifier such as `order` (required). Prefer one short word, as [Effective Go](https://go.dev/doc/effective_go#package-names) recommends; `user_profile` style names work and produce `UserProfile` types and `/user-profiles` routes |
-| `-store`, `-cache`, `-http` | Add the SQL repository (sqlx), cache, or HTTP API layer |
-| `-all` | Add every layer |
+| `-store`, `-cache` | Add the SQL repository (sqlx) or the cache |
+| `-http` | Add the HTTP API (`handler/httpapi`) |
+| `-queue` | Add a message consumer: `nsq`, `kafka`, `nats` or `rabbitmq` (`handler/<queue>consumer`) |
+| `-cron` | Add scheduled jobs (`handler/cronjob`, standard library only) |
+| `-all` | Same as `-store -cache -http -cron`; add `-queue` for a consumer |
 | `-dir` | Parent directory to create the domain in (default `.`). Use `internal` in applications so other modules can't import your domains |
 | `-module` | Import path of `-dir`, if you're not inside a Go module |
 | `-no-prompt` | Never ask; generate only the layers given by flags |
@@ -79,12 +83,44 @@ order/
 │   └── sqlstore.go         Repository with sqlx: context everywhere, WithTx, row ↔ domain mapping
 ├── cache/                  -cache
 │   └── cache.go            in-memory Cache (swap in Redis behind the same interface)
-└── httpapi/                -http
-    ├── routes.go           RegisterRoutes(mux, logger, svc) with Go 1.22 method patterns
-    ├── handlers.go         GET /orders/{id}, POST /orders
-    ├── respond.go          JSON decode/encode, RFC 9457 errors, slog
-    └── handlers_test.go    httptest table tests
+└── handler/                inbound adapters: one package per transport
+    ├── httpapi/            -http
+    │   ├── routes.go       RegisterRoutes(mux, logger, svc) with Go 1.22 method patterns
+    │   ├── handlers.go     GET /orders/{id}, POST /orders
+    │   ├── respond.go      JSON decode/encode, RFC 9457 errors, slog
+    │   └── handlers_test.go
+    ├── kafkaconsumer/      -queue kafka (or nsqconsumer, natsconsumer, rabbitconsumer)
+    │   ├── message.go      decode the payload, call the service, classify errors
+    │   ├── consumer.go     broker-specific ack / retry / dead-letter handling
+    │   └── *_test.go
+    └── cronjob/            -cron
+        ├── cronjob.go      Jobs(svc) and a non-overlapping, context-aware runner
+        └── cronjob_test.go
 ```
+
+### Message queues
+
+Each consumer uses the de facto Go client for its broker and handles failures the way that broker expects.
+Bad payloads and `ErrInvalid` are **permanent**: retrying can't fix them, so they are dropped or
+dead-lettered instead of blocking the queue. Everything else is **retryable**.
+
+| `-queue` | Client | Permanent failure | Retryable failure |
+|---|---|---|---|
+| `nsq` | [`nsqio/go-nsq`](https://github.com/nsqio/go-nsq) | finish and log | requeue with backoff, give up after `MaxAttempts` |
+| `kafka` | [`segmentio/kafka-go`](https://github.com/segmentio/kafka-go) | log and commit the offset | retry in place with exponential backoff (keeps partition order); commit only after success |
+| `nats` | [`nats-io/nats.go/jetstream`](https://github.com/nats-io/nats.go) | `TermWithReason` (no redelivery) | `NakWithDelay` |
+| `rabbitmq` | [`rabbitmq/amqp091-go`](https://github.com/rabbitmq/amqp091-go) | `Nack` without requeue (to the dead-letter exchange, if configured) | `Nack` with requeue |
+
+Delivery is at least once for every broker, so keep message handlers idempotent. The latest
+`nats.go` requires Go 1.26; on Go 1.25, `go get github.com/nats-io/nats.go@v1.51.0`.
+
+### Why `handler/httpapi` and not `handler/http`?
+
+Grouping inbound adapters under `handler/` keeps every entry point (HTTP, queues, schedules) in one
+place, as in hexagonal "ports". Each one is still its own package that depends only on
+`order.Service`, so an HTTP service doesn't compile in Kafka and a consumer can be tested alone.
+The leaf names avoid the packages they wrap (`net/http`, `nsq`, `kafka`, `cron`), so callers never
+need an import alias.
 
 The design follows well-known Go guidance rather than inventing its own:
 
@@ -92,7 +128,8 @@ The design follows well-known Go guidance rather than inventing its own:
 |---|---|
 | Domain types and the `Service` interface in the root package, implementations in subpackages | Ben Johnson, [Standard Package Layout](https://www.gobeyond.dev/standard-package-layout/) |
 | Interfaces (`Repository`, `Cache`) declared by the package that uses them | [Go Code Review Comments](https://go.dev/wiki/CodeReviewComments#interfaces) |
-| Adapter packages named after what they depend on (`sqlstore`, `httpapi`), not `store`/`handler` | Standard Package Layout; also avoids shadowing `net/http` |
+| Adapter packages named after what they wrap (`sqlstore`, `httpapi`, `kafkaconsumer`), never the same name as the library | Standard Package Layout; avoids shadowing `net/http` and client packages |
+| Inbound adapters grouped under `handler/`, one package per transport | Hexagonal ports; Three Dots Labs, [Wild Workouts](https://github.com/ThreeDotsLabs/wild-workouts-go-ddd-example) |
 | No package-level state; everything wired with constructors in `main` | Peter Bourgon, [A theory of modern Go](https://peter.bourgon.org/blog/2017/06/09/theory-of-modern-go.html) |
 | `RegisterRoutes(mux, ...)`, handlers that return `http.Handler`, no global `DefaultServeMux` | Mat Ryer, [How I write HTTP services in Go after 13 years](https://grafana.com/blog/how-i-write-http-services-in-go-after-13-years/) |
 | Transactions through `WithTx(ctx, fn)` instead of leaking Commit/Rollback into the service | Three Dots Labs, [Repository pattern in Go](https://threedots.tech/post/repository-pattern-in-go/) |
@@ -127,6 +164,11 @@ svc := service.New(sqlstore.New(db), cache.NewMemory())
 mux := http.NewServeMux()
 httpapi.RegisterRoutes(mux, logger, svc)
 
+go cronjob.Run(ctx, logger, cronjob.Jobs(svc)...)
+
+r := kafka.NewReader(kafka.ReaderConfig{Brokers: brokers, GroupID: "order-service", Topic: "orders.create"})
+go kafkaconsumer.New(logger, svc, r).Run(ctx)
+
 srv := &http.Server{Addr: ":8080", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 log.Fatal(srv.ListenAndServe())
 ```
@@ -150,7 +192,7 @@ Or in any client that reads an `mcpServers` JSON config:
 ```
 
 The server exposes one tool, `generate_domain` (`name`, absolute `dir`, optional `module`,
-`store`, `cache`, `http`, `dry_run`), and returns the created files and any `go get` steps as
+`store`, `cache`, `http`, `queue`, `cron`, `dry_run`), and returns the created files and any `go get` steps as
 structured output.
 
 **Agent Skill.** Copy [`skills/domain-generator`](skills/domain-generator) into your agent's skills

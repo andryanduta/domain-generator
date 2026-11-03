@@ -1,0 +1,47 @@
+package natsconsumer
+
+import (
+	"io"
+	"log/slog"
+	"testing"
+	"time"
+
+	"github.com/nats-io/nats.go/jetstream"
+)
+
+// fakeMsg implements jetstream.Msg; methods the handler doesn't use panic via the nil embed.
+type fakeMsg struct {
+	jetstream.Msg
+	data    []byte
+	outcome string
+}
+
+func (m *fakeMsg) Data() []byte                       { return m.data }
+func (m *fakeMsg) Subject() string                    { return "test" }
+func (m *fakeMsg) Ack() error                         { m.outcome = "ack"; return nil }
+func (m *fakeMsg) NakWithDelay(time.Duration) error   { m.outcome = "nak"; return nil }
+func (m *fakeMsg) TermWithReason(string) error        { m.outcome = "term"; return nil }
+
+func TestHandle(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	tests := []struct {
+		name   string
+		body   string
+		svcErr error
+		want   string
+	}{
+		{"success is acked", `{"name":"example"}`, nil, "ack"},
+		{"bad payload is terminated", `not json`, nil, "term"},
+		{"invalid input is terminated", `{"name":""}`, nil, "term"},
+		{"retryable error is nakked", `{"name":"example"}`, errUnavailable, "nak"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := &fakeMsg{data: []byte(tt.body)}
+			New(logger, &fakeService{err: tt.svcErr}).Handle(msg)
+			if msg.outcome != tt.want {
+				t.Fatalf("outcome = %q, want %q", msg.outcome, tt.want)
+			}
+		})
+	}
+}

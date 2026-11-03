@@ -16,11 +16,19 @@ people and coding agents working in this package.
 | `cache/` | Adapter | Implements `service.Cache` (`Memory` for now). |
 {{- end}}
 {{- if .HTTP}}
-| `httpapi/` | Transport | Decodes requests, calls `{{.Name}}.Service`, encodes responses. Errors are RFC 9457 `application/problem+json`. |
+| `handler/httpapi/` | Inbound: HTTP | Decodes requests, calls `{{.Name}}.Service`, encodes responses. Errors are RFC 9457 `application/problem+json`. |
+{{- end}}
+{{- if .Queue}}
+| `handler/{{.QueuePkg}}/` | Inbound: {{.Queue}} | Decodes messages (`message.go`), calls `{{.Name}}.Service`. Permanent failures (bad payload, `ErrInvalid`) are dropped or dead-lettered; other errors are retried. |
+{{- end}}
+{{- if .Cron}}
+| `handler/cronjob/` | Inbound: schedule | `Jobs(svc)` lists scheduled jobs; `Run` executes them without overlap until the context ends. |
 {{- end}}
 
-Dependencies point inward: adapters and transport depend on `service` and the domain, never the
-reverse. Wire everything in `main` with constructors; there is no global state.
+Dependencies point inward: adapters (`sqlstore`, `cache`) and inbound handlers (`handler/...`)
+depend on `service` and the domain, never the reverse. Each `handler/` subpackage depends only on
+`{{.Name}}.Service`, never on another handler. Wire everything in `main` with constructors; there
+is no global state.
 
 ## When you change this package
 
@@ -28,7 +36,14 @@ reverse. Wire everything in `main` with constructors; there is no global state.
 - New data access: add the method to the interface in `service/service.go`, then implement it in the adapter.
 - Business rule violations: return (or wrap with `%w`) a domain error so the transport maps it to the right status.
 - Keep the compile-time checks (`var _ {{.Name}}.Service = (*Service)(nil)`) so drift fails the build.
+- Keep every handler thin: decode, call the service, encode or acknowledge. Business rules live in `service/`.
 {{- if .HTTP}}
-- Keep handlers thin. Timeouts belong on the `http.Server` or `http.TimeoutHandler`; always pass `r.Context()` down.
+- HTTP timeouts belong on the `http.Server` or `http.TimeoutHandler`; always pass `r.Context()` down.
+{{- end}}
+{{- if .Queue}}
+- Message handlers must be idempotent: brokers deliver at least once, so the same message can arrive twice.
+{{- end}}
+{{- if .Cron}}
+- With several replicas, guard jobs with a distributed lock so each runs once per interval.
 {{- end}}
 - Before finishing: `gofmt -l .`, `go vet ./...`, `go test ./...`.

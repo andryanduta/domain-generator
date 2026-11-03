@@ -1,0 +1,35 @@
+package nsqconsumer
+
+import (
+	"io"
+	"log/slog"
+	"testing"
+
+	"github.com/nsqio/go-nsq"
+)
+
+func TestHandleMessage(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	tests := []struct {
+		name     string
+		body     string
+		attempts uint16
+		svcErr   error
+		wantErr  bool
+	}{
+		{"success is finished", `{"name":"example"}`, 1, nil, false},
+		{"bad payload is dropped", `not json`, 1, nil, false},
+		{"retryable error is requeued", `{"name":"example"}`, 1, errUnavailable, true},
+		{"exhausted attempts are dropped", `{"name":"example"}`, MaxAttempts, errUnavailable, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := nsq.NewMessage(nsq.MessageID{}, []byte(tt.body))
+			m.Attempts = tt.attempts
+			err := New(logger, &fakeService{err: tt.svcErr}).HandleMessage(m)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("HandleMessage error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}

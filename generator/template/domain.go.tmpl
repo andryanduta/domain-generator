@@ -1,7 +1,8 @@
 // Package {{.Name}} is the {{.Name}} domain: its entities, errors and the Service contract.
 //
 // It has no dependencies on storage or transport. Implementations live in subpackages:
-// service (business logic){{if .Store}}, sqlstore (SQL persistence){{end}}{{if .Cache}}, cache{{end}}{{if .HTTP}}, httpapi (HTTP transport){{end}}.
+// service (business logic){{if .Store}}, sqlstore (SQL persistence){{end}}{{if .Cache}}, cache{{end}}{{if or .HTTP .Queue .Cron}}, and
+// handler/ for inbound adapters ({{if .HTTP}}httpapi{{end}}{{if and .HTTP .Queue}}, {{end}}{{.QueuePkg}}{{if and (or .HTTP .Queue) .Cron}}, {{end}}{{if .Cron}}cronjob{{end}}){{end}}.
 package {{.Name}}
 
 import (

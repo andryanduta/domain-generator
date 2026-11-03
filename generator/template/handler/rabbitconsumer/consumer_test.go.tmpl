@@ -1,0 +1,54 @@
+package rabbitconsumer
+
+import (
+	"context"
+	"io"
+	"log/slog"
+	"testing"
+
+	amqp "github.com/rabbitmq/amqp091-go"
+)
+
+// fakeAck records how a delivery was settled.
+type fakeAck struct{ outcome string }
+
+func (a *fakeAck) Ack(uint64, bool) error { a.outcome = "ack"; return nil }
+func (a *fakeAck) Nack(_ uint64, _ bool, requeue bool) error {
+	if requeue {
+		a.outcome = "requeue"
+	} else {
+		a.outcome = "reject"
+	}
+	return nil
+}
+func (a *fakeAck) Reject(_ uint64, requeue bool) error { return a.Nack(0, false, requeue) }
+
+func TestRun(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	tests := []struct {
+		name   string
+		body   string
+		svcErr error
+		want   string
+	}{
+		{"success is acked", `{"name":"example"}`, nil, "ack"},
+		{"bad payload is rejected", `not json`, nil, "reject"},
+		{"retryable error is requeued", `{"name":"example"}`, errUnavailable, "requeue"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ack := &fakeAck{}
+			deliveries := make(chan amqp.Delivery, 1)
+			deliveries <- amqp.Delivery{Acknowledger: ack, Body: []byte(tt.body)}
+			close(deliveries)
+
+			err := New(logger, &fakeService{err: tt.svcErr}).Run(context.Background(), deliveries)
+			if err == nil {
+				t.Fatal("Run should report the closed channel")
+			}
+			if ack.outcome != tt.want {
+				t.Fatalf("outcome = %q, want %q", ack.outcome, tt.want)
+			}
+		})
+	}
+}

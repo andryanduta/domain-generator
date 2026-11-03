@@ -1,6 +1,6 @@
 # Response formats
 
-Generated `httpapi` packages use two plain conventions:
+Generated `handler/httpapi` packages use two plain conventions:
 
 - **Success:** the resource itself as JSON, e.g. `{"id":1,"name":"Andryan"}` with `200` or `201`.
 - **Errors:** [RFC 9457 problem details](https://www.rfc-editor.org/rfc/rfc9457) with
@@ -20,7 +20,7 @@ Why this default: RFC 9457 is the IETF standard for HTTP API errors (it replaces
 gateways, OpenAPI tooling and HTTP clients understand it out of the box, and the HTTP status code
 stays the single source of truth for success or failure.
 
-Everything lives in two functions in `httpapi/respond.go`, `writeJSON` and `writeProblem`. To use
+Everything lives in two functions in `handler/httpapi/respond.go`, `writeJSON` and `writeProblem`. To use
 a different format, change only those two.
 
 ## Alternative: a JSON envelope (Tokopedia style)
@@ -55,7 +55,7 @@ consumer has to unwrap `data`, and there's no shared standard for the error shap
 
 ### Switching a generated domain to the envelope
 
-Replace `writeJSON` and `writeProblem` in `httpapi/respond.go` (and keep the handlers as they are):
+Replace `writeJSON` and `writeProblem` in `handler/httpapi/respond.go` (and keep the handlers as they are):
 
 ```go
 // Envelope is the standard response wrapper.
@@ -121,5 +121,5 @@ func writeEnvelope(w http.ResponseWriter, status int, env Envelope) {
 ```
 
 To fill `process_time`, record `start := time.Now()` in a middleware, store it in the request
-context, and read it in `writeEnvelope`. Then update `httpapi/handlers_test.go`, which currently
+context, and read it in `writeEnvelope`. Then update `handler/httpapi/handlers_test.go`, which currently
 expects `application/problem+json` for errors.

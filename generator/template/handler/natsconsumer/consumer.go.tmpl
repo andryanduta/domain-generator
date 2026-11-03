@@ -1,0 +1,59 @@
+// Package natsconsumer consumes {{.Name}} messages from NATS JetStream
+// (github.com/nats-io/nats.go/jetstream).
+//
+// Wire it in main:
+//
+//	js, _ := jetstream.New(nc)
+//	cons, _ := js.CreateOrUpdateConsumer(ctx, "{{.Table}}", jetstream.ConsumerConfig{
+//		Durable: "{{.Name}}-service", FilterSubject: "{{.Route}}.create", AckPolicy: jetstream.AckExplicitPolicy,
+//	})
+//	cc, _ := cons.Consume(natsconsumer.New(logger, svc).Handle)
+//	defer cc.Stop()
+package natsconsumer
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"time"
+
+	"github.com/nats-io/nats.go/jetstream"
+
+	"{{.ImportPath}}"
+)
+
+// Handler acknowledges handled messages, terminates permanent failures (no redelivery) and
+// naks retryable ones with a delay so JetStream redelivers them.
+type Handler struct {
+	logger     *slog.Logger
+	svc        {{.Name}}.Service
+	timeout    time.Duration
+	retryDelay time.Duration
+}
+
+var _ jetstream.MessageHandler = (*Handler)(nil).Handle
+
+// New returns a Handler with a 30 s per-message timeout and a 5 s retry delay.
+func New(logger *slog.Logger, svc {{.Name}}.Service) *Handler {
+	return &Handler{logger: logger, svc: svc, timeout: 30 * time.Second, retryDelay: 5 * time.Second}
+}
+
+// Handle is a jetstream.MessageHandler.
+func (h *Handler) Handle(msg jetstream.Msg) {
+	ctx, cancel := context.WithTimeout(context.Background(), h.timeout)
+	defer cancel()
+
+	err := handle(ctx, h.svc, msg.Data())
+	switch {
+	case err == nil:
+		if err := msg.Ack(); err != nil {
+			h.logger.ErrorContext(ctx, "ack failed", "subject", msg.Subject(), "error", err)
+		}
+	case errors.Is(err, errPermanent):
+		h.logger.WarnContext(ctx, "terminating {{.Name}} message", "subject", msg.Subject(), "error", err)
+		_ = msg.TermWithReason(err.Error())
+	default:
+		h.logger.ErrorContext(ctx, "retrying {{.Name}} message", "subject", msg.Subject(), "error", err)
+		_ = msg.NakWithDelay(h.retryDelay)
+	}
+}

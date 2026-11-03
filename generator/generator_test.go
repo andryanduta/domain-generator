@@ -81,9 +81,13 @@ func TestGenerateFiles(t *testing.T) {
 		want []string
 	}{
 		{"core only", Options{}, []string{"AGENTS.md", "order.go", "service/service.go", "service/service_test.go"}},
-		{"all layers", Options{Store: true, Cache: true, HTTP: true}, []string{
-			"AGENTS.md", "cache/cache.go", "httpapi/handlers.go", "httpapi/handlers_test.go", "httpapi/respond.go",
-			"httpapi/routes.go", "order.go", "service/service.go", "service/service_test.go", "sqlstore/sqlstore.go",
+		{"all layers", Options{Store: true, Cache: true, HTTP: true, Queue: "kafka", Cron: true}, []string{
+			"AGENTS.md", "cache/cache.go",
+			"handler/cronjob/cronjob.go", "handler/cronjob/cronjob_test.go",
+			"handler/httpapi/handlers.go", "handler/httpapi/handlers_test.go", "handler/httpapi/respond.go", "handler/httpapi/routes.go",
+			"handler/kafkaconsumer/consumer.go", "handler/kafkaconsumer/consumer_test.go",
+			"handler/kafkaconsumer/message.go", "handler/kafkaconsumer/message_test.go",
+			"order.go", "service/service.go", "service/service_test.go", "sqlstore/sqlstore.go",
 		}},
 	}
 	for _, tc := range cases {
@@ -108,6 +112,13 @@ func TestGenerateFiles(t *testing.T) {
 			}
 			assertNoLeftovers(t, dir)
 		})
+	}
+}
+
+func TestGenerateRejectsUnknownQueue(t *testing.T) {
+	_, err := Generate(Options{Name: "order", Dir: t.TempDir(), Module: "example.com/app", Queue: "sqs"})
+	if err == nil || !strings.Contains(err.Error(), "unknown queue") {
+		t.Fatalf("err = %v, want unknown queue", err)
 	}
 }
 
@@ -151,7 +162,7 @@ func TestGenerateRejectsTraversal(t *testing.T) {
 }
 
 func TestRenderedGoIsFormattedAndHasNoPlaceholders(t *testing.T) {
-	out, err := Render(Options{Name: "order", Store: true, Cache: true, HTTP: true}, "example.com/app/order")
+	out, err := Render(Options{Name: "order", Store: true, Cache: true, HTTP: true, Queue: "nsq", Cron: true}, "example.com/app/order")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,10 +193,7 @@ func TestGeneratedCodeCompiles(t *testing.T) {
 			t.Run(name+"/"+combo.label(), func(t *testing.T) {
 				t.Parallel()
 				root := t.TempDir()
-				writeFile(t, filepath.Join(root, "go.mod"), strings.Join([]string{
-					"module example.com/app", "", "go 1.22", "",
-					"require github.com/jmoiron/sqlx v1.4.0", "",
-				}, "\n"))
+				writeFile(t, filepath.Join(root, "go.mod"), "module example.com/app\n\ngo 1.25\n\n"+pinnedDeps)
 
 				opts := combo.opts
 				opts.Name, opts.Dir = name, root
@@ -219,17 +227,42 @@ func (c combo) label() string {
 	if c.opts.HTTP {
 		parts = append(parts, "http")
 	}
+	if c.opts.Queue != "" {
+		parts = append(parts, c.opts.Queue)
+	}
+	if c.opts.Cron {
+		parts = append(parts, "cron")
+	}
 	if len(parts) == 0 {
 		return "core"
 	}
 	return strings.Join(parts, "+")
 }
 
+// pinnedDeps pins the client libraries generated code may import, so the compile test is
+// reproducible. Bump them deliberately.
+const pinnedDeps = `require (
+	github.com/jmoiron/sqlx v1.4.0
+	github.com/nats-io/nats.go v1.51.0 // newest release supporting Go 1.25
+	github.com/nsqio/go-nsq v1.1.0
+	github.com/rabbitmq/amqp091-go v1.16.0
+	github.com/segmentio/kafka-go v0.4.51
+)
+`
+
+// layerCombos covers every store/cache/http combination, every queue alone with cron, and
+// every queue with all other layers.
 func layerCombos() []combo {
 	var out []combo
 	for i := 0; i < 8; i++ {
 		out = append(out, combo{Options{Store: i&1 != 0, Cache: i&2 != 0, HTTP: i&4 != 0}})
 	}
+	for _, q := range Queues() {
+		out = append(out,
+			combo{Options{Queue: q, Cron: true}},
+			combo{Options{Store: true, Cache: true, HTTP: true, Queue: q}})
+	}
+	out = append(out, combo{Options{Cron: true}})
 	return out
 }
 

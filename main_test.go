@@ -19,8 +19,8 @@ import (
 // reader swallowed buffered answers and piped input never enabled the HTTP handler.
 func TestAskLayersReadsAllPipedAnswers(t *testing.T) {
 	var opts generator.Options
-	askLayers(&opts, bufio.NewReader(strings.NewReader("y\nyes\nY\n")), &bytes.Buffer{})
-	if !opts.Store || !opts.Cache || !opts.HTTP {
+	askLayers(&opts, bufio.NewReader(strings.NewReader("y\nyes\nY\nKafka\ny\n")), &bytes.Buffer{})
+	if !opts.Store || !opts.Cache || !opts.HTTP || opts.Queue != "kafka" || !opts.Cron {
 		t.Fatalf("got %+v, want all layers enabled", opts)
 	}
 }
@@ -42,6 +42,27 @@ func TestRunJSON(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "order", "sqlstore", "sqlstore.go")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunQueueAndCron(t *testing.T) {
+	dir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"-name", "order", "-dir", dir, "-module", "example.com/app", "-queue", "nats", "-cron", "-json"},
+		strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s, stdout: %s", code, stderr.String(), stdout.String())
+	}
+	for _, f := range []string{"handler/natsconsumer/consumer.go", "handler/cronjob/cronjob.go"} {
+		if _, err := os.Stat(filepath.Join(dir, "order", filepath.FromSlash(f))); err != nil {
+			t.Error(err)
+		}
+	}
+
+	stdout.Reset()
+	if code := run([]string{"-name", "x", "-dir", dir, "-module", "m", "-queue", "sqs", "-json"},
+		strings.NewReader(""), &stdout, &stderr); code == 0 || !strings.Contains(stdout.String(), "unknown queue") {
+		t.Fatalf("exit %d, output %s: want an unknown queue error", code, stdout.String())
 	}
 }
 
@@ -84,7 +105,7 @@ func TestMCPGenerateDomain(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("tool error: %+v", res.Content)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "order", "httpapi", "routes.go")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, "order", "handler", "httpapi", "routes.go")); err != nil {
 		t.Fatal(err)
 	}
 

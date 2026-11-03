@@ -35,12 +35,16 @@ type Options struct {
 	Dir string `json:"dir,omitempty"`
 	// Module is the import path of Dir. When empty it is detected from the nearest go.mod.
 	Module string `json:"module,omitempty"`
-	// Store adds a SQL store layer (store/store.go) using sqlx.
+	// Store adds a SQL repository (sqlstore/) using sqlx.
 	Store bool `json:"store,omitempty"`
-	// Cache adds a cache store layer (store/cachestore.go).
+	// Cache adds a cache (cache/).
 	Cache bool `json:"cache,omitempty"`
-	// HTTP adds an HTTP handler layer (handler/http).
+	// HTTP adds an HTTP API (handler/httpapi/).
 	HTTP bool `json:"http,omitempty"`
+	// Queue adds a message consumer (handler/<queue>consumer/). One of Queues, or "" for none.
+	Queue string `json:"queue,omitempty"`
+	// Cron adds scheduled jobs (handler/cronjob/).
+	Cron bool `json:"cron,omitempty"`
 	// DryRun renders and validates everything but writes nothing.
 	DryRun bool `json:"dry_run,omitempty"`
 }
@@ -88,7 +92,41 @@ var reservedNames = map[string]bool{
 	"service": true, "sqlstore": true, "cache": true, "httpapi": true,
 	"context": true, "errors": true, "fmt": true, "strings": true, "strconv": true, "sync": true,
 	"sql": true, "sqlx": true, "json": true, "http": true, "httptest": true, "slog": true,
-	"io": true, "testing": true,
+	"io": true, "testing": true, "time": true, "atomic": true, "handler": true, "cronjob": true,
+	"nsq": true, "nsqconsumer": true, "kafka": true, "kafkaconsumer": true, "jetstream": true,
+	"nats": true, "natsconsumer": true, "amqp": true, "rabbitconsumer": true,
+}
+
+// queueSpec describes a supported message queue.
+type queueSpec struct {
+	pkg string // generated package, under handler/
+	dep string // client module the generated code imports
+}
+
+// queues are the supported values of Options.Queue.
+var queues = map[string]queueSpec{
+	"nsq":      {pkg: "nsqconsumer", dep: "github.com/nsqio/go-nsq"},
+	"kafka":    {pkg: "kafkaconsumer", dep: "github.com/segmentio/kafka-go"},
+	"nats":     {pkg: "natsconsumer", dep: "github.com/nats-io/nats.go"},
+	"rabbitmq": {pkg: "rabbitconsumer", dep: "github.com/rabbitmq/amqp091-go"},
+}
+
+// Queues returns the supported message queue names, sorted.
+func Queues() []string {
+	out := make([]string, 0, len(queues))
+	for q := range queues {
+		out = append(out, q)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// validateOptions checks everything except the name.
+func validateOptions(opts Options) error {
+	if _, ok := queues[opts.Queue]; opts.Queue != "" && !ok {
+		return fmt.Errorf("unknown queue %q: use one of %s", opts.Queue, strings.Join(Queues(), ", "))
+	}
+	return nil
 }
 
 // DetectModule returns the import path of dir by finding the nearest go.mod above it.
@@ -129,6 +167,9 @@ type templateData struct {
 	Store      bool
 	Cache      bool
 	HTTP       bool
+	Queue      string // nsq, kafka, nats, rabbitmq or ""
+	QueuePkg   string // e.g. kafkaconsumer
+	Cron       bool
 }
 
 func newTemplateData(opts Options, importPath string) templateData {
@@ -151,6 +192,9 @@ func newTemplateData(opts Options, importPath string) templateData {
 		Store:      opts.Store,
 		Cache:      opts.Cache,
 		HTTP:       opts.HTTP,
+		Queue:      opts.Queue,
+		QueuePkg:   queues[opts.Queue].pkg,
+		Cron:       opts.Cron,
 	}
 }
 
@@ -199,16 +243,34 @@ var files = []fileSpec{
 	{"template/service/service_test.go.tmpl", "service/service_test.go", always},
 	{"template/sqlstore/sqlstore.go.tmpl", "sqlstore/sqlstore.go", func(d templateData) bool { return d.Store }},
 	{"template/cache/cache.go.tmpl", "cache/cache.go", func(d templateData) bool { return d.Cache }},
-	{"template/httpapi/routes.go.tmpl", "httpapi/routes.go", func(d templateData) bool { return d.HTTP }},
-	{"template/httpapi/handlers.go.tmpl", "httpapi/handlers.go", func(d templateData) bool { return d.HTTP }},
-	{"template/httpapi/respond.go.tmpl", "httpapi/respond.go", func(d templateData) bool { return d.HTTP }},
-	{"template/httpapi/handlers_test.go.tmpl", "httpapi/handlers_test.go", func(d templateData) bool { return d.HTTP }},
+	{"template/handler/httpapi/routes.go.tmpl", "handler/httpapi/routes.go", isHTTP},
+	{"template/handler/httpapi/handlers.go.tmpl", "handler/httpapi/handlers.go", isHTTP},
+	{"template/handler/httpapi/respond.go.tmpl", "handler/httpapi/respond.go", isHTTP},
+	{"template/handler/httpapi/handlers_test.go.tmpl", "handler/httpapi/handlers_test.go", isHTTP},
+	{"template/handler/consumer/message.go.tmpl", "handler/{{.QueuePkg}}/message.go", hasQueue},
+	{"template/handler/consumer/message_test.go.tmpl", "handler/{{.QueuePkg}}/message_test.go", hasQueue},
+	{"template/handler/{{.QueuePkg}}/consumer.go.tmpl", "handler/{{.QueuePkg}}/consumer.go", hasQueue},
+	{"template/handler/{{.QueuePkg}}/consumer_test.go.tmpl", "handler/{{.QueuePkg}}/consumer_test.go", hasQueue},
+	{"template/handler/cronjob/cronjob.go.tmpl", "handler/cronjob/cronjob.go", isCron},
+	{"template/handler/cronjob/cronjob_test.go.tmpl", "handler/cronjob/cronjob_test.go", isCron},
+}
+
+func isHTTP(d templateData) bool   { return d.HTTP }
+func hasQueue(d templateData) bool { return d.Queue != "" }
+func isCron(d templateData) bool   { return d.Cron }
+
+// expandPath fills the {{.Name}} and {{.QueuePkg}} placeholders in a file spec path.
+func expandPath(p string, d templateData) string {
+	return strings.NewReplacer("{{.Name}}", d.Name, "{{.QueuePkg}}", d.QueuePkg).Replace(p)
 }
 
 // Render returns the generated files (slash-separated relative path -> content) without
 // touching disk. importPath is the import path of the new domain package.
 func Render(opts Options, importPath string) (map[string][]byte, error) {
 	if err := ValidateName(opts.Name); err != nil {
+		return nil, err
+	}
+	if err := validateOptions(opts); err != nil {
 		return nil, err
 	}
 	data := newTemplateData(opts, importPath)
@@ -218,20 +280,21 @@ func Render(opts Options, importPath string) (map[string][]byte, error) {
 		if !f.include(data) {
 			continue
 		}
-		src, err := templateFS.ReadFile(f.tmpl)
+		tmplPath := expandPath(f.tmpl, data)
+		src, err := templateFS.ReadFile(tmplPath)
 		if err != nil {
 			return nil, err
 		}
-		t, err := template.New(f.tmpl).Option("missingkey=error").Parse(string(src))
+		t, err := template.New(tmplPath).Option("missingkey=error").Parse(string(src))
 		if err != nil {
-			return nil, fmt.Errorf("parse %s: %w", f.tmpl, err)
+			return nil, fmt.Errorf("parse %s: %w", tmplPath, err)
 		}
 		var buf bytes.Buffer
 		if err := t.Execute(&buf, data); err != nil {
-			return nil, fmt.Errorf("render %s: %w", f.tmpl, err)
+			return nil, fmt.Errorf("render %s: %w", tmplPath, err)
 		}
 		content := buf.Bytes()
-		name := strings.ReplaceAll(f.out, "{{.Name}}", opts.Name)
+		name := expandPath(f.out, data)
 		if strings.HasSuffix(name, ".go") {
 			if content, err = format.Source(content); err != nil {
 				return nil, fmt.Errorf("generated %s is not valid Go (template bug): %w", name, err)
@@ -246,6 +309,9 @@ func Render(opts Options, importPath string) (map[string][]byte, error) {
 // directory, and writes into a temporary directory first so a failure leaves nothing behind.
 func Generate(opts Options) (Result, error) {
 	if err := ValidateName(opts.Name); err != nil {
+		return Result{}, err
+	}
+	if err := validateOptions(opts); err != nil {
 		return Result{}, err
 	}
 	if opts.Dir == "" {
@@ -280,6 +346,9 @@ func Generate(opts Options) (Result, error) {
 	sort.Strings(res.Files)
 	if opts.Store {
 		res.NeedsDeps = append(res.NeedsDeps, "github.com/jmoiron/sqlx")
+	}
+	if q, ok := queues[opts.Queue]; ok {
+		res.NeedsDeps = append(res.NeedsDeps, q.dep)
 	}
 
 	if _, err := os.Lstat(target); err == nil {
