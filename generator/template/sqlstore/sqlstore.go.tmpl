@@ -1,0 +1,98 @@
+// Package sqlstore implements service.Repository on a SQL database using sqlx.
+//
+// Queries use ? placeholders and are rebound for your driver. Create uses
+// INSERT ... RETURNING, which PostgreSQL, SQLite and MariaDB support; on MySQL use
+// ExecContext + LastInsertId instead.
+//
+// Expected table (PostgreSQL):
+//
+//	CREATE TABLE {{.Table}} (
+//		id   BIGSERIAL PRIMARY KEY,
+//		name TEXT NOT NULL
+//	);
+package sqlstore
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+
+	"github.com/jmoiron/sqlx"
+
+	"{{.ImportPath}}"
+	"{{.ImportPath}}/service"
+)
+
+// Repository implements service.Repository.
+type Repository struct {
+	db *sqlx.DB         // nil inside a transaction
+	q  sqlx.ExtContext // *sqlx.DB or *sqlx.Tx
+}
+
+var _ service.Repository = (*Repository)(nil)
+
+// New returns a Repository backed by db.
+func New(db *sqlx.DB) *Repository {
+	return &Repository{db: db, q: db}
+}
+
+// row is the database shape of a {{.Name}}, kept separate so the domain type has no db tags.
+type row struct {
+	ID   int64  `db:"id"`
+	Name string `db:"name"`
+}
+
+func (r row) toDomain() {{.Name}}.{{.Type}} {
+	return {{.Name}}.{{.Type}}{ID: r.ID, Name: r.Name}
+}
+
+// Get implements service.Repository.
+func (r *Repository) Get(ctx context.Context, id int64) ({{.Name}}.{{.Type}}, error) {
+	var got row
+	err := sqlx.GetContext(ctx, r.q, &got, r.q.Rebind(`SELECT id, name FROM {{.Table}} WHERE id = ?`), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return {{.Name}}.{{.Type}}{}, {{.Name}}.ErrNotFound
+	}
+	if err != nil {
+		return {{.Name}}.{{.Type}}{}, fmt.Errorf("get {{.Name}} %d: %w", id, err)
+	}
+	return got.toDomain(), nil
+}
+
+// Create implements service.Repository.
+func (r *Repository) Create(ctx context.Context, in {{.Name}}.{{.Type}}) ({{.Name}}.{{.Type}}, error) {
+	var got row
+	err := sqlx.GetContext(ctx, r.q, &got, r.q.Rebind(`INSERT INTO {{.Table}} (name) VALUES (?) RETURNING id, name`), in.Name)
+	if err != nil {
+		return {{.Name}}.{{.Type}}{}, fmt.Errorf("create {{.Name}}: %w", err)
+	}
+	return got.toDomain(), nil
+}
+
+// WithTx implements service.Repository. Nested calls reuse the outer transaction.
+func (r *Repository) WithTx(ctx context.Context, fn func(service.Repository) error) (err error) {
+	if r.db == nil {
+		return fn(r)
+	}
+	tx, err := r.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback()
+			panic(p)
+		}
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if err = fn(&Repository{q: tx}); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+	return nil
+}

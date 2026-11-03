@@ -17,15 +17,15 @@ type generateInput struct {
 	Name   string `json:"name" jsonschema:"domain name; must be a lowercase Go identifier such as order or user_profile"`
 	Dir    string `json:"dir" jsonschema:"absolute path of the parent directory to create the domain in, usually inside a Go module"`
 	Module string `json:"module,omitempty" jsonschema:"import path of dir; leave empty to detect it from the nearest go.mod"`
-	Store  bool   `json:"store,omitempty" jsonschema:"add a SQL store layer (sqlx)"`
-	Cache  bool   `json:"cache,omitempty" jsonschema:"add a cache store layer"`
-	HTTP   bool   `json:"http,omitempty" jsonschema:"add an HTTP handler layer"`
+	Store  bool   `json:"store,omitempty" jsonschema:"add a sqlstore package: SQL Repository using sqlx with context and WithTx"`
+	Cache  bool   `json:"cache,omitempty" jsonschema:"add a cache package: in-memory Cache behind an interface"`
+	HTTP   bool   `json:"http,omitempty" jsonschema:"add an httpapi package: net/http routes, JSON bodies, RFC 9457 problem+json errors"`
 	DryRun bool   `json:"dry_run,omitempty" jsonschema:"only report the files that would be created"`
 }
 
-const toolDescription = `Scaffold a DDD-style Go domain package (domain contract, service, and optional store, cache and HTTP layers) in one deterministic step.
-Use it instead of hand-writing boilerplate when adding a new domain to a Go service. The output is gofmt'ed, compiles, never overwrites an existing directory, and includes an AGENTS.md describing the layer rules to follow when filling in business logic.
-After generating: run "go get" for any needs_deps, then implement the TODOs.`
+const toolDescription = `Scaffold a DDD-style Go domain package in one deterministic step: entity, domain errors and Service interface; a service implementation with table-driven tests; and optional sqlstore (sqlx), cache and httpapi (net/http, RFC 9457 errors) packages.
+Use it instead of hand-writing boilerplate when adding a new domain to a Go service. The output is gofmt'ed, compiles, passes its own tests, never overwrites an existing directory, and includes an AGENTS.md with the layer rules to follow when adding business logic.
+After generating: run "go get" for any needs_deps, run "go test ./...", then build the feature following <name>/AGENTS.md.`
 
 func newMCPServer() *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "domain-generator", Version: version}, nil)

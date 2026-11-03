@@ -1,0 +1,18 @@
+// Package httpapi exposes {{.Name}}.Service over HTTP with JSON bodies and
+// RFC 9457 problem details for errors.
+package httpapi
+
+import (
+	"log/slog"
+	"net/http"
+
+	"{{.ImportPath}}"
+)
+
+// RegisterRoutes adds the {{.Name}} routes to mux. Configure timeouts on your http.Server
+// (ReadHeaderTimeout, WriteTimeout) or wrap mux with http.TimeoutHandler; handlers pass
+// r.Context() to the service so cancellations propagate.
+func RegisterRoutes(mux *http.ServeMux, logger *slog.Logger, svc {{.Name}}.Service) {
+	mux.Handle("GET /{{.Route}}/{id}", handleGet(logger, svc))
+	mux.Handle("POST /{{.Route}}", handleCreate(logger, svc))
+}

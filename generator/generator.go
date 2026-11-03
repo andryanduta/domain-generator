@@ -76,8 +76,19 @@ func ValidateName(name string) error {
 		return fmt.Errorf("invalid domain name %q: it is a Go keyword", name)
 	case name == "main" || name == "internal" || name == "vendor" || name == "testdata":
 		return fmt.Errorf("invalid domain name %q: reserved by the Go toolchain", name)
+	case reservedNames[name]:
+		return fmt.Errorf("invalid domain name %q: it clashes with a package the generated code imports", name)
 	}
 	return nil
+}
+
+// reservedNames are package names imported by the generated code (or its own subpackages);
+// a domain with one of these names would not compile.
+var reservedNames = map[string]bool{
+	"service": true, "sqlstore": true, "cache": true, "httpapi": true,
+	"context": true, "errors": true, "fmt": true, "strings": true, "strconv": true, "sync": true,
+	"sql": true, "sqlx": true, "json": true, "http": true, "httptest": true, "slog": true,
+	"io": true, "testing": true,
 }
 
 // DetectModule returns the import path of dir by finding the nearest go.mod above it.
@@ -109,11 +120,52 @@ func DetectModule(dir string) (string, error) {
 }
 
 type templateData struct {
-	Name       string
+	Name       string // package name, e.g. user_profile
+	Type       string // exported entity type, e.g. UserProfile
+	Var        string // unexported identifier prefix, e.g. userProfile
+	Route      string // URL path segment, e.g. user-profiles
+	Table      string // SQL table name, e.g. user_profiles
 	ImportPath string
 	Store      bool
 	Cache      bool
 	HTTP       bool
+}
+
+func newTemplateData(opts Options, importPath string) templateData {
+	parts := strings.Split(opts.Name, "_")
+	var typ strings.Builder
+	for _, p := range parts {
+		if p != "" {
+			typ.WriteString(strings.ToUpper(p[:1]) + p[1:])
+		}
+	}
+	t := typ.String()
+	plural := pluralize(opts.Name)
+	return templateData{
+		Name:       opts.Name,
+		Type:       t,
+		Var:        strings.ToLower(t[:1]) + t[1:],
+		Route:      strings.ReplaceAll(plural, "_", "-"),
+		Table:      plural,
+		ImportPath: importPath,
+		Store:      opts.Store,
+		Cache:      opts.Cache,
+		HTTP:       opts.HTTP,
+	}
+}
+
+// pluralize is a small English pluralizer for route and table names; rename them in the
+// generated code if it guesses wrong.
+func pluralize(s string) string {
+	switch {
+	case strings.HasSuffix(s, "s"), strings.HasSuffix(s, "x"), strings.HasSuffix(s, "z"),
+		strings.HasSuffix(s, "ch"), strings.HasSuffix(s, "sh"):
+		return s + "es"
+	case len(s) > 1 && strings.HasSuffix(s, "y") && !strings.ContainsRune("aeiou", rune(s[len(s)-2])):
+		return s[:len(s)-1] + "ies"
+	default:
+		return s + "s"
+	}
 }
 
 // modulePath returns the module path declared in go.mod content, or "" if there is none.
@@ -143,13 +195,14 @@ func always(templateData) bool { return true }
 var files = []fileSpec{
 	{"template/domain.go.tmpl", "{{.Name}}.go", always},
 	{"template/AGENTS.md.tmpl", "AGENTS.md", always},
-	{"template/service.go.tmpl", "service/service.go", always},
-	{"template/store/store.go.tmpl", "store/store.go", func(d templateData) bool { return d.Store }},
-	{"template/store/cachestore.go.tmpl", "store/cachestore.go", func(d templateData) bool { return d.Cache }},
-	{"template/handler/http/http.go.tmpl", "handler/http/http.go", func(d templateData) bool { return d.HTTP }},
-	{"template/handler/http/error.go.tmpl", "handler/http/error.go", func(d templateData) bool { return d.HTTP }},
-	{"template/handler/http/foo_handler.go.tmpl", "handler/http/foo_handler.go", func(d templateData) bool { return d.HTTP }},
-	{"template/handler/http/util.go.tmpl", "handler/http/util.go", func(d templateData) bool { return d.HTTP }},
+	{"template/service/service.go.tmpl", "service/service.go", always},
+	{"template/service/service_test.go.tmpl", "service/service_test.go", always},
+	{"template/sqlstore/sqlstore.go.tmpl", "sqlstore/sqlstore.go", func(d templateData) bool { return d.Store }},
+	{"template/cache/cache.go.tmpl", "cache/cache.go", func(d templateData) bool { return d.Cache }},
+	{"template/httpapi/routes.go.tmpl", "httpapi/routes.go", func(d templateData) bool { return d.HTTP }},
+	{"template/httpapi/handlers.go.tmpl", "httpapi/handlers.go", func(d templateData) bool { return d.HTTP }},
+	{"template/httpapi/respond.go.tmpl", "httpapi/respond.go", func(d templateData) bool { return d.HTTP }},
+	{"template/httpapi/handlers_test.go.tmpl", "httpapi/handlers_test.go", func(d templateData) bool { return d.HTTP }},
 }
 
 // Render returns the generated files (slash-separated relative path -> content) without
@@ -158,7 +211,7 @@ func Render(opts Options, importPath string) (map[string][]byte, error) {
 	if err := ValidateName(opts.Name); err != nil {
 		return nil, err
 	}
-	data := templateData{Name: opts.Name, ImportPath: importPath, Store: opts.Store, Cache: opts.Cache, HTTP: opts.HTTP}
+	data := newTemplateData(opts, importPath)
 
 	out := make(map[string][]byte)
 	for _, f := range files {

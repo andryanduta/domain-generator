@@ -1,32 +1,31 @@
-// Package {{.Name}} defines the {{.Name}} domain: its data types and the Service contract.
+// Package {{.Name}} is the {{.Name}} domain: its entities, errors and the Service contract.
+//
+// It has no dependencies on storage or transport. Implementations live in subpackages:
+// service (business logic){{if .Store}}, sqlstore (SQL persistence){{end}}{{if .Cache}}, cache{{end}}{{if .HTTP}}, httpapi (HTTP transport){{end}}.
 package {{.Name}}
 
 import (
 	"context"
+	"errors"
 )
 
-// Data is an example {{.Name}} entity. Replace it with your own fields.
-type Data struct {
-	ID     int64 `json:"id"`
-	ShopID int64 `json:"shop_id"`
+// {{.Type}} is the {{.Name}} entity. Replace the example fields with your own.
+type {{.Type}} struct {
+	ID   int64
+	Name string
 }
 
-//go:generate mockgen -destination=mock/service.go -package=mock {{.ImportPath}} Service
+// Domain errors. Wrap them with fmt.Errorf("%w: ...") to add detail; callers match them
+// with errors.Is, and the transport layer maps them to status codes.
+var (
+	ErrNotFound = errors.New("{{.Name}}: not found")
+	ErrInvalid  = errors.New("{{.Name}}: invalid input")
+)
 
-// Service is the {{.Name}} domain contract implemented by the service package.
+// Service is the {{.Name}} use-case contract, implemented by the service package.
 type Service interface {
-	// Get returns one {{.Name}} entity by ID.
-	Get(ctx context.Context, id int64) (Data, error)
-}
-
-var defaultService Service
-
-// Init sets the default {{.Name}} Service.
-func Init(svc Service) {
-	defaultService = svc
-}
-
-// GetService returns the default {{.Name}} Service.
-func GetService() Service {
-	return defaultService
+	// Get returns the {{.Name}} with the given ID, or ErrNotFound.
+	Get(ctx context.Context, id int64) ({{.Type}}, error)
+	// Create validates and stores a new {{.Name}}, returning it with its ID set.
+	Create(ctx context.Context, in {{.Type}}) ({{.Type}}, error)
 }

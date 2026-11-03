@@ -1,0 +1,58 @@
+package httpapi
+
+import (
+	"fmt"
+	"log/slog"
+	"net/http"
+	"strconv"
+
+	"{{.ImportPath}}"
+)
+
+// {{.Var}}JSON is the wire format of a {{.Name}}; keeping it separate from {{.Name}}.{{.Type}}
+// lets the API and the domain evolve independently.
+type {{.Var}}JSON struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
+
+func to{{.Type}}JSON(v {{.Name}}.{{.Type}}) {{.Var}}JSON {
+	return {{.Var}}JSON{ID: v.ID, Name: v.Name}
+}
+
+type create{{.Type}}Request struct {
+	Name string `json:"name"`
+}
+
+func handleGet(logger *slog.Logger, svc {{.Name}}.Service) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		if err != nil {
+			writeProblem(w, r, logger, fmt.Errorf("%w: id must be an integer", {{.Name}}.ErrInvalid))
+			return
+		}
+		v, err := svc.Get(r.Context(), id)
+		if err != nil {
+			writeProblem(w, r, logger, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, to{{.Type}}JSON(v))
+	})
+}
+
+func handleCreate(logger *slog.Logger, svc {{.Name}}.Service) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		req, err := decode[create{{.Type}}Request](w, r)
+		if err != nil {
+			writeProblem(w, r, logger, fmt.Errorf("%w: %v", {{.Name}}.ErrInvalid, err))
+			return
+		}
+		v, err := svc.Create(r.Context(), {{.Name}}.{{.Type}}{Name: req.Name})
+		if err != nil {
+			writeProblem(w, r, logger, err)
+			return
+		}
+		w.Header().Set("Location", fmt.Sprintf("/{{.Route}}/%d", v.ID))
+		writeJSON(w, http.StatusCreated, to{{.Type}}JSON(v))
+	})
+}

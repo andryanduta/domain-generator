@@ -1,0 +1,92 @@
+package httpapi
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"{{.ImportPath}}"
+)
+
+// fakeService is a minimal {{.Name}}.Service for handler tests.
+type fakeService struct{ items map[int64]{{.Name}}.{{.Type}} }
+
+func (f *fakeService) Get(_ context.Context, id int64) ({{.Name}}.{{.Type}}, error) {
+	v, ok := f.items[id]
+	if !ok {
+		return {{.Name}}.{{.Type}}{}, {{.Name}}.ErrNotFound
+	}
+	return v, nil
+}
+
+func (f *fakeService) Create(_ context.Context, in {{.Name}}.{{.Type}}) ({{.Name}}.{{.Type}}, error) {
+	if strings.TrimSpace(in.Name) == "" {
+		return {{.Name}}.{{.Type}}{}, {{.Name}}.ErrInvalid
+	}
+	in.ID = int64(len(f.items) + 1)
+	f.items[in.ID] = in
+	return in, nil
+}
+
+func newTestServer() *httptest.Server {
+	mux := http.NewServeMux()
+	svc := &fakeService{items: map[int64]{{.Name}}.{{.Type}}{1: {ID: 1, Name: "example"}}}
+	RegisterRoutes(mux, slog.New(slog.NewTextHandler(io.Discard, nil)), svc)
+	return httptest.NewServer(mux)
+}
+
+func TestHandlers(t *testing.T) {
+	srv := newTestServer()
+	defer srv.Close()
+
+	tests := []struct {
+		name        string
+		method      string
+		path        string
+		body        string
+		wantStatus  int
+		wantContent string
+	}{
+		{"get existing", http.MethodGet, "/{{.Route}}/1", "", http.StatusOK, "application/json"},
+		{"get missing", http.MethodGet, "/{{.Route}}/99", "", http.StatusNotFound, "application/problem+json"},
+		{"get bad id", http.MethodGet, "/{{.Route}}/abc", "", http.StatusBadRequest, "application/problem+json"},
+		{"create", http.MethodPost, "/{{.Route}}", `{"name":"new"}`, http.StatusCreated, "application/json"},
+		{"create empty name", http.MethodPost, "/{{.Route}}", `{"name":""}`, http.StatusBadRequest, "application/problem+json"},
+		{"create unknown field", http.MethodPost, "/{{.Route}}", `{"nme":"typo"}`, http.StatusBadRequest, "application/problem+json"},
+		{"wrong method", http.MethodDelete, "/{{.Route}}/1", "", http.StatusMethodNotAllowed, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequest(tt.method, srv.URL+tt.path, strings.NewReader(tt.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer res.Body.Close()
+
+			if res.StatusCode != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", res.StatusCode, tt.wantStatus)
+			}
+			if tt.wantContent != "" && res.Header.Get("Content-Type") != tt.wantContent {
+				t.Fatalf("Content-Type = %q, want %q", res.Header.Get("Content-Type"), tt.wantContent)
+			}
+			if tt.wantContent == "application/problem+json" {
+				var p Problem
+				if err := json.NewDecoder(res.Body).Decode(&p); err != nil {
+					t.Fatal(err)
+				}
+				if p.Status != tt.wantStatus || p.Title == "" {
+					t.Fatalf("problem = %+v", p)
+				}
+			}
+		})
+	}
+}

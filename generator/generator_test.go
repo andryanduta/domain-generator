@@ -16,7 +16,7 @@ func TestValidateName(t *testing.T) {
 			t.Errorf("ValidateName(%q) = %v, want nil", name, err)
 		}
 	}
-	for _, name := range []string{"", "Order", "my-domain", "../escaped", "a/b", "1order", "_x", "func", "type", "main", "internal", "with space"} {
+	for _, name := range []string{"", "Order", "my-domain", "../escaped", "a/b", "1order", "_x", "func", "type", "main", "internal", "with space", "service", "cache", "http", "errors"} {
 		if err := ValidateName(name); err == nil {
 			t.Errorf("ValidateName(%q) = nil, want error", name)
 		}
@@ -58,16 +58,32 @@ func TestDetectModule(t *testing.T) {
 	}
 }
 
+func TestTemplateDataNames(t *testing.T) {
+	cases := []struct{ name, typ, v, route, table string }{
+		{"order", "Order", "order", "orders", "orders"},
+		{"user_profile", "UserProfile", "userProfile", "user-profiles", "user_profiles"},
+		{"address", "Address", "address", "addresses", "addresses"},
+		{"category", "Category", "category", "categories", "categories"},
+		{"day", "Day", "day", "days", "days"},
+	}
+	for _, c := range cases {
+		d := newTemplateData(Options{Name: c.name}, "x")
+		if d.Type != c.typ || d.Var != c.v || d.Route != c.route || d.Table != c.table {
+			t.Errorf("%s: got %+v", c.name, d)
+		}
+	}
+}
+
 func TestGenerateFiles(t *testing.T) {
 	cases := []struct {
 		name string
 		opts Options
 		want []string
 	}{
-		{"core only", Options{}, []string{"AGENTS.md", "order.go", "service/service.go"}},
+		{"core only", Options{}, []string{"AGENTS.md", "order.go", "service/service.go", "service/service_test.go"}},
 		{"all layers", Options{Store: true, Cache: true, HTTP: true}, []string{
-			"AGENTS.md", "handler/http/error.go", "handler/http/foo_handler.go", "handler/http/http.go",
-			"handler/http/util.go", "order.go", "service/service.go", "store/cachestore.go", "store/store.go",
+			"AGENTS.md", "cache/cache.go", "httpapi/handlers.go", "httpapi/handlers_test.go", "httpapi/respond.go",
+			"httpapi/routes.go", "order.go", "service/service.go", "service/service_test.go", "sqlstore/sqlstore.go",
 		}},
 	}
 	for _, tc := range cases {
@@ -149,8 +165,9 @@ func TestRenderedGoIsFormattedAndHasNoPlaceholders(t *testing.T) {
 	}
 }
 
-// TestGeneratedCodeCompiles generates every layer combination into a throwaway module and
-// runs `go vet` on it. sqlx is replaced by a local stub so the test works offline.
+// TestGeneratedCodeCompiles generates every layer combination (for a simple and a
+// multi-word domain name) into a throwaway module, then runs `go vet` and the generated
+// tests against the real sqlx module.
 func TestGeneratedCodeCompiles(t *testing.T) {
 	if testing.Short() {
 		t.Skip("compiles generated code with the go tool")
@@ -160,32 +177,32 @@ func TestGeneratedCodeCompiles(t *testing.T) {
 		t.Skip("go tool not found")
 	}
 
-	for _, combo := range layerCombos() {
-		t.Run(combo.label(), func(t *testing.T) {
-			t.Parallel()
-			root := t.TempDir()
-			writeFile(t, filepath.Join(root, "go.mod"), strings.Join([]string{
-				"module example.com/app", "", "go 1.22", "",
-				"require github.com/jmoiron/sqlx v1.4.0", "",
-				"replace github.com/jmoiron/sqlx => ./_stub/sqlx", "",
-			}, "\n"))
-			writeFile(t, filepath.Join(root, "_stub", "sqlx", "go.mod"), "module github.com/jmoiron/sqlx\n\ngo 1.22\n")
-			writeFile(t, filepath.Join(root, "_stub", "sqlx", "sqlx.go"),
-				"package sqlx\n\nimport \"database/sql\"\n\n// Tx stubs sqlx.Tx.\ntype Tx struct{ *sql.Tx }\n")
+	for _, name := range []string{"order", "user_profile"} {
+		for _, combo := range layerCombos() {
+			t.Run(name+"/"+combo.label(), func(t *testing.T) {
+				t.Parallel()
+				root := t.TempDir()
+				writeFile(t, filepath.Join(root, "go.mod"), strings.Join([]string{
+					"module example.com/app", "", "go 1.22", "",
+					"require github.com/jmoiron/sqlx v1.4.0", "",
+				}, "\n"))
 
-			opts := combo.opts
-			opts.Name, opts.Dir = "order", root
-			if _, err := Generate(opts); err != nil {
-				t.Fatal(err)
-			}
+				opts := combo.opts
+				opts.Name, opts.Dir = name, root
+				if _, err := Generate(opts); err != nil {
+					t.Fatal(err)
+				}
 
-			cmd := exec.Command(goBin, "vet", "./order/...")
-			cmd.Dir = root
-			cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off", "GOTOOLCHAIN=local", "GOPROXY=off")
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("generated code does not compile:\n%s", out)
-			}
-		})
+				for _, args := range [][]string{{"vet", "./..."}, {"test", "-count=1", "./..."}} {
+					cmd := exec.Command(goBin, args...)
+					cmd.Dir = root
+					cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off", "GOTOOLCHAIN=local")
+					if out, err := cmd.CombinedOutput(); err != nil {
+						t.Fatalf("go %s on generated code failed:\n%s", strings.Join(args, " "), out)
+					}
+				}
+			})
+		}
 	}
 }
 

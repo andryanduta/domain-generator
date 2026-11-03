@@ -1,0 +1,89 @@
+// Package service implements {{.Name}}.Service.
+package service
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"{{.ImportPath}}"
+)
+{{if .Store}}
+// Repository persists {{.Name}} entities. sqlstore.Repository implements it.
+type Repository interface {
+	// Get returns {{.Name}}.ErrNotFound when no row matches.
+	Get(ctx context.Context, id int64) ({{.Name}}.{{.Type}}, error)
+	Create(ctx context.Context, in {{.Name}}.{{.Type}}) ({{.Name}}.{{.Type}}, error)
+	// WithTx runs fn in a single transaction. The Repository passed to fn uses that
+	// transaction; returning an error rolls it back.
+	WithTx(ctx context.Context, fn func(Repository) error) error
+}
+{{end}}{{if .Cache}}
+// Cache is a read-through cache for {{.Name}} entities. cache.Memory implements it.
+type Cache interface {
+	Get(ctx context.Context, id int64) ({{.Name}}.{{.Type}}, bool, error)
+	Set(ctx context.Context, v {{.Name}}.{{.Type}}) error
+}
+{{end}}
+// Service implements {{.Name}}.Service.
+type Service struct {
+{{- if .Store}}
+	repo Repository
+{{- end}}
+{{- if .Cache}}
+	cache Cache
+{{- end}}
+}
+
+var _ {{.Name}}.Service = (*Service)(nil)
+
+// New creates a {{.Name}} Service.
+func New({{if .Store}}repo Repository{{end}}{{if and .Store .Cache}}, {{end}}{{if .Cache}}cache Cache{{end}}) *Service {
+	return &Service{
+{{- if .Store}}
+		repo: repo,
+{{- end}}
+{{- if .Cache}}
+		cache: cache,
+{{- end}}
+	}
+}
+
+// Get implements {{.Name}}.Service.
+func (s *Service) Get(ctx context.Context, id int64) ({{.Name}}.{{.Type}}, error) {
+	if id <= 0 {
+		return {{.Name}}.{{.Type}}{}, fmt.Errorf("%w: id must be positive", {{.Name}}.ErrInvalid)
+	}
+{{- if .Cache}}
+	if v, ok, err := s.cache.Get(ctx, id); err == nil && ok {
+		return v, nil
+	}
+{{- end}}
+{{- if .Store}}
+	v, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return {{.Name}}.{{.Type}}{}, err
+	}
+{{- if .Cache}}
+	_ = s.cache.Set(ctx, v) // best effort: a cache failure must not fail the read
+{{- end}}
+	return v, nil
+{{- else}}
+	// TODO: load the {{.Name}} from your data source.
+	return {{.Name}}.{{.Type}}{}, {{.Name}}.ErrNotFound
+{{- end}}
+}
+
+// Create implements {{.Name}}.Service.
+func (s *Service) Create(ctx context.Context, in {{.Name}}.{{.Type}}) ({{.Name}}.{{.Type}}, error) {
+	in.Name = strings.TrimSpace(in.Name)
+	if in.Name == "" {
+		return {{.Name}}.{{.Type}}{}, fmt.Errorf("%w: name is required", {{.Name}}.ErrInvalid)
+	}
+{{- if .Store}}
+	return s.repo.Create(ctx, in)
+{{- else}}
+	// TODO: persist the {{.Name}}.
+	return in, nil
+{{- end}}
+}

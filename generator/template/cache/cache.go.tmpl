@@ -1,0 +1,42 @@
+// Package cache implements service.Cache.
+//
+// Memory is an in-process cache, good for tests and single-instance services. For a shared
+// cache (e.g. Redis), add another type in this package that implements service.Cache.
+package cache
+
+import (
+	"context"
+	"sync"
+
+	"{{.ImportPath}}"
+	"{{.ImportPath}}/service"
+)
+
+// Memory is a concurrency-safe in-memory service.Cache.
+type Memory struct {
+	mu    sync.RWMutex
+	items map[int64]{{.Name}}.{{.Type}}
+}
+
+var _ service.Cache = (*Memory)(nil)
+
+// NewMemory returns an empty Memory cache.
+func NewMemory() *Memory {
+	return &Memory{items: make(map[int64]{{.Name}}.{{.Type}})}
+}
+
+// Get implements service.Cache.
+func (m *Memory) Get(_ context.Context, id int64) ({{.Name}}.{{.Type}}, bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	v, ok := m.items[id]
+	return v, ok, nil
+}
+
+// Set implements service.Cache.
+func (m *Memory) Set(_ context.Context, v {{.Name}}.{{.Type}}) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.items[v.ID] = v
+	return nil
+}

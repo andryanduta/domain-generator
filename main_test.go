@@ -40,7 +40,7 @@ func TestRunJSON(t *testing.T) {
 	if res.ImportPath != "example.com/app/order" || len(res.NeedsDeps) != 1 {
 		t.Fatalf("unexpected result %+v", res)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "order", "store", "store.go")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, "order", "sqlstore", "sqlstore.go")); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -84,7 +84,7 @@ func TestMCPGenerateDomain(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("tool error: %+v", res.Content)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "order", "handler", "http", "http.go")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, "order", "httpapi", "routes.go")); err != nil {
 		t.Fatal(err)
 	}
 

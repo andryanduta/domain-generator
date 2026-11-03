@@ -53,9 +53,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.StringVar(&opts.Name, "name", "", "domain name: lowercase Go identifier, e.g. order (required)")
 	fs.StringVar(&opts.Dir, "dir", ".", "parent directory to create the domain in")
 	fs.StringVar(&opts.Module, "module", "", "import path of -dir (default: detected from go.mod)")
-	fs.BoolVar(&opts.Store, "store", false, "add a SQL store layer (sqlx)")
-	fs.BoolVar(&opts.Cache, "cache", false, "add a cache store layer")
-	fs.BoolVar(&opts.HTTP, "http", false, "add an HTTP handler layer")
+	fs.BoolVar(&opts.Store, "store", false, "add a SQL repository (sqlstore, sqlx)")
+	fs.BoolVar(&opts.Cache, "cache", false, "add a cache (cache)")
+	fs.BoolVar(&opts.HTTP, "http", false, "add an HTTP API (httpapi, RFC 9457 errors)")
 	fs.BoolVar(&all, "all", false, "add every layer (same as -store -cache -http)")
 	fs.BoolVar(&noPrompt, "no-prompt", false, "never ask; only generate the layers given by flags")
 	fs.BoolVar(&opts.DryRun, "dry-run", false, "show what would be generated without writing files")
@@ -124,9 +124,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // askLayers asks which optional layers to add. It reads every answer from one reader, so
 // piped input such as `printf 'y\nn\ny\n' | domain-generator -name x` works.
 func askLayers(opts *generator.Options, in *bufio.Reader, out io.Writer) {
-	opts.Store = ask(in, out, "Add a SQL store layer? (y/N): ")
-	opts.Cache = ask(in, out, "Add a cache store layer? (y/N): ")
-	opts.HTTP = ask(in, out, "Add an HTTP handler layer? (y/N): ")
+	opts.Store = ask(in, out, "Add a SQL repository (sqlstore)? (y/N): ")
+	opts.Cache = ask(in, out, "Add a cache? (y/N): ")
+	opts.HTTP = ask(in, out, "Add an HTTP API (httpapi)? (y/N): ")
 }
 
 func ask(in *bufio.Reader, out io.Writer, question string) bool {

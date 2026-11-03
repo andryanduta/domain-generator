@@ -7,21 +7,28 @@ people and coding agents working in this package.
 
 | Path | Layer | Rule |
 |---|---|---|
-| `{{.Name}}.go` | Domain contract | Entities and the `Service` interface. No I/O, no imports from other layers. |
-| `service/` | Business logic | Implements `{{.Name}}.Service`. Talks to storage only through the interfaces it declares (`Store`, `CacheStore`). |
-{{- if or .Store .Cache}}
-| `store/` | Persistence | Implements the interfaces declared in `service/`. No business rules here. |
+| `{{.Name}}.go` | Domain | Entities, domain errors (`ErrNotFound`, `ErrInvalid`) and the `Service` interface. No I/O, no imports from other layers. |
+| `service/` | Use cases | Implements `{{.Name}}.Service`. Declares the interfaces it needs{{if .Store}} (`Repository`{{if .Cache}}, `Cache`{{end}}){{else if .Cache}} (`Cache`){{end}} and never imports adapters. |
+{{- if .Store}}
+| `sqlstore/` | Adapter | Implements `service.Repository` with sqlx. Maps rows to domain types; no business rules. |
+{{- end}}
+{{- if .Cache}}
+| `cache/` | Adapter | Implements `service.Cache` (`Memory` for now). |
 {{- end}}
 {{- if .HTTP}}
-| `handler/http/` | Transport | Decodes requests, calls `{{.Name}}.Service`, encodes responses. No business rules here. |
+| `httpapi/` | Transport | Decodes requests, calls `{{.Name}}.Service`, encodes responses. Errors are RFC 9457 `application/problem+json`. |
 {{- end}}
 
-Dependencies point inward: handler → domain ← service → (interfaces) ← store.
+Dependencies point inward: adapters and transport depend on `service` and the domain, never the
+reverse. Wire everything in `main` with constructors; there is no global state.
 
 ## When you change this package
 
-- Add a use case: add the method to `Service` in `{{.Name}}.go` first, then implement it in `service/`.
-- Need new data access: declare it on the interface in `service/service.go`, then implement it in `store/`.
+- New use case: add it to `Service` in `{{.Name}}.go`, implement it in `service/`, and add a case to `service/service_test.go`.
+- New data access: add the method to the interface in `service/service.go`, then implement it in the adapter.
+- Business rule violations: return (or wrap with `%w`) a domain error so the transport maps it to the right status.
 - Keep the compile-time checks (`var _ {{.Name}}.Service = (*Service)(nil)`) so drift fails the build.
-- Regenerate mocks with `go generate ./...` (uses [mockgen](https://github.com/uber-go/mock)).
+{{- if .HTTP}}
+- Keep handlers thin. Timeouts belong on the `http.Server` or `http.TimeoutHandler`; always pass `r.Context()` down.
+{{- end}}
 - Before finishing: `gofmt -l .`, `go vet ./...`, `go test ./...`.
